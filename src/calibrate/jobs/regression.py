@@ -21,6 +21,7 @@ client = bigquery.Client.from_service_account_json(CREDENTIALS)
 
 RF_REG_MODEL = os.getenv('RF_REG_MODEL', 'jobs/rf_reg_model.pkl')
 LASSO_MODEL = os.getenv('LASSO_MODEL', 'jobs/lasso_model.pkl')
+STD_ERR = os.getenv('STD_ERR', 'jobs/std_err.pkl')
 
 def get_lowcost_data():
     sql = """
@@ -125,15 +126,14 @@ def random_forest(hourly_combined_dataset):
     rf_regressor = RandomForestRegressor(random_state=42, max_features='sqrt', n_estimators= 1000, max_depth=50, bootstrap = True)
     # Fitting the model 
     rf_regressor = rf_regressor.fit(X, y) 
+    
     # save the model to disk
     filename = RF_REG_MODEL
     pickle.dump(rf_regressor, open(filename, 'wb'))
-
     ##dump the model to google cloud storage.
     #save_trained_model(rf_regressor,'airqo-250220','airqo_prediction_bucket', 'PM2.5_calibrate_model.pkl')
-
-    
     return rf_regressor
+
 
 def get_clean_data_PM10():
     sql = """
@@ -197,12 +197,20 @@ def lasso_reg(dataset):
 
    # Fitting the model 
     lasso_regressor = Lasso(random_state=0).fit(X, y)
+    
+    #Compute standard error
+    std_err = np.std(y - lasso_regressor.predict(X))  # Standard error
+
+    # Save std_err to a file
+    nameerr = STD_ERR
+    pickle.dump(std_err, open(nameerr, 'wb'))
+    
     # save the model to disk
     filename = LASSO_MODEL
     pickle.dump(lasso_regressor, open(filename, 'wb'))
 
     ##dump the model to google cloud storage.
-    #save_trained_model(rf_regressor,'airqo-250220','airqo_prediction_bucket', 'PM2.5_calibrate_model.pkl')
+    #save_trained_model(rf_regressor,'airqo-250220','airqo_prediction_bucket', 'PM2.5_calibrate_model.pkl')   
     return lasso_regressor
 
 if __name__ == "__main__":
