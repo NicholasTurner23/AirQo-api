@@ -1,7 +1,6 @@
 import os
 import pickle
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -12,7 +11,7 @@ load_dotenv(dotenv_path)
 
 RF_REG_MODEL = os.getenv('RF_REG_MODEL', 'jobs/rf_reg_model.pkl')
 LASSO_MODEL = os.getenv('LASSO_MODEL', 'jobs/lasso_model.pkl')
-
+STD_ERR = os.getenv('STD_ERR', 'jobs/std_err.pkl')
 
 class Regression:
     """
@@ -27,6 +26,8 @@ class Regression:
         # load model from disk
         self.rf_regressor = pickle.load(open(RF_REG_MODEL, 'rb'))
         self.lasso_regressor = pickle.load(open(LASSO_MODEL, 'rb'))
+        self.std_err = pickle.load(open(STD_ERR, 'rb'))
+
         # # load model from GCP
         # rf_regressor = self.get_model('airqo-250220','airqo_prediction_bucket', 'PM2.5_calibrate_model.pkl')
 
@@ -61,7 +62,14 @@ class Regression:
         calibrated_pm2_5 = self.rf_regressor.predict(input_variables)[0]
         calibrated_pm10 = self.lasso_regressor.predict(input_variables)[0]
 
-        return calibrated_pm2_5, calibrated_pm10
+        # Calculate predictions and prediction interval on test set
+        # alpha = 0.05  # Default significance level
+        t = np.abs(np.random.standard_t(input_variables.shape[0] - 1, size=input_variables.shape[0]))  # t-distribution quantile
+        width = t * self.std_err
+        lower_bound_pm10 = calibrated_pm10 - width
+        upper_bound_pm10 = calibrated_pm10 + width
+
+        return calibrated_pm2_5, calibrated_pm10, lower_bound_pm10, upper_bound_pm10
 
 
 if __name__ == "__main__":
