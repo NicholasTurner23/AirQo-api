@@ -62,14 +62,14 @@ class Regression:
         calibrated_pm2_5 = self.rf_regressor.predict(input_variables)[0]
         calibrated_pm10 = self.lasso_regressor.predict(input_variables)[0]
 
-        # Calculate predictions and prediction interval on test set
-        # alpha = 0.05  # Default significance level
-        t = np.abs(np.random.standard_t(input_variables.shape[0] - 1, size=input_variables.shape[0]))  # t-distribution quantile
-        width = t * self.std_err
-        lower_bound_pm10 = calibrated_pm10 - width
-        upper_bound_pm10 = calibrated_pm10 + width
+        # # Calculate predictions and prediction interval on test set
+        # # alpha = 0.05  # Default significance level
+        # t = np.abs(np.random.standard_t(input_variables.shape[0] - 1, size=input_variables.shape[0]))  # t-distribution quantile
+        # width = t * self.std_err
+        # lower_bound_pm10 = calibrated_pm10 - width
+        # upper_bound_pm10 = calibrated_pm10 + width
 
-        return calibrated_pm2_5, calibrated_pm10, lower_bound_pm10, upper_bound_pm10
+        return calibrated_pm2_5, calibrated_pm10#, lower_bound_pm10, upper_bound_pm10
 
 
 if __name__ == "__main__":
