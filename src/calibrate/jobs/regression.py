@@ -23,6 +23,12 @@ RF_REG_MODEL = os.getenv('RF_REG_MODEL', 'jobs/rf_reg_model.pkl')
 LASSO_MODEL = os.getenv('LASSO_MODEL', 'jobs/lasso_model.pkl')
 STD_ERR = os.getenv('STD_ERR', 'jobs/std_err.pkl')
 
+#function for filtering PM values
+def filter_columns(dataframe, columns):
+    for column in columns:
+        dataframe = dataframe[(dataframe[column] >= 0) & (dataframe[column] <= 500.4)]
+    return dataframe
+
 def get_lowcost_data():
     sql = """
     SELECT 
@@ -37,8 +43,7 @@ def get_lowcost_data():
         created_at
         """
     lowcost_data = client.query(sql).to_dataframe()
-    lowcost_data = lowcost_data[(lowcost_data['avg_pm2_5'] > 0)&(lowcost_data['avg_pm2_5'] <= 500.4)]
-    lowcost_data = lowcost_data[(lowcost_data['avg_pm10'] > 0)&(lowcost_data['avg_pm10'] <= 500.4)]
+    lowcost_data = filter_columns(lowcost_data, ['avg_pm2_5','avg_pm10'])
                                        
     lowcost_data["TimeStamp"] = pd.to_datetime(lowcost_data["created_at"])
     lowcost_data["TimeStamp"] = lowcost_data["TimeStamp"]+datetime.timedelta(hours=3)
@@ -153,15 +158,8 @@ def get_clean_data_PM10():
     dataset = client.query(sql).to_dataframe()
 
     # Remove outliers
-    dataset  = dataset[(dataset['AQ_G501_PM10'] >= 0)&(dataset['AQ_G501_PM10'] <= 500.4)]
-    dataset  = dataset[(dataset['AQ_G501_PM2_5'] >= 0)&(dataset['AQ_G501_PM2_5'] <= 500.4)]
-    dataset  = dataset[(dataset['AQ_G501_Sensor_I__PM10'] >= 0)&(dataset['AQ_G501_Sensor_I__PM10'] <= 500.4)]
-    dataset  = dataset[(dataset['AQ_G501_Sensor_II__PM10'] >= 0)&(dataset['AQ_G501_Sensor_II__PM10'] <= 500.4)]
-    dataset  = dataset[(dataset['AQ_G501_Sensor_I__PM2_5'] >= 0)&(dataset['AQ_G501_Sensor_I__PM2_5'] <= 500.4)]
-    dataset  = dataset[(dataset['AQ_G501_Sensor_II__PM2_5'] >= 0)&(dataset['AQ_G501_Sensor_II__PM2_5'] <= 500.4)]
+    dataset = filter_columns(dataset, ['AQ_G501_PM10','AQ_G501_PM2_5','AQ_G501_Sensor_I__PM10','AQ_G501_Sensor_II__PM10','AQ_G501_Sensor_I__PM2_5','AQ_G501_Sensor_II__PM2_5','MUK_BAM_Y24516__PM10'])
 
-
-    dataset  = dataset[(dataset['MUK_BAM_Y24516__PM10'] >= 0)&(dataset['MUK_BAM_Y24516__PM10'] <= 500.4)]
     dataset  = dataset[(dataset['MUK_BAM_Y24516__AT_C'] >= 0)&(dataset['MUK_BAM_Y24516__AT_C'] <=45)]
     dataset  = dataset[(dataset['MUK_BAM_Y24516__RH'] >= 0)&(dataset['MUK_BAM_Y24516__RH'] <= 99)]
     
