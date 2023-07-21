@@ -29,9 +29,7 @@ class Regression:
     def compute_calibrated_val(self, map_columns, df):      
         # Map columns from uploaded csv
         df.rename(columns=map_columns,inplace=True)
-        print("DFDFDF:",df)
         df = df.dropna()
-        print("DFDFDF:",df)
 
         # features from datetime and PM
         df["datetime"] = pd.to_datetime(df["datetime"])
