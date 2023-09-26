@@ -31,6 +31,30 @@ jobs:
         CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
       with: 
         directory: src/auth-service/coverage
+        
+  device-monitoring:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        working-directory: src/device-monitoring
+    name: Code Coverage for device-monitoring
+    steps:
+    - uses: actions/checkout@v3
+    - uses: actions/setup-python@v2
+      with:
+        python-version: '3.11'
+    - name: Install requirements
+      run: pip install -r requirements/prod.txt
+    - name: Run tests and collect coverage
+      run: pytest --cov=. tests/ --cov-report=xml
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v3
+      env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      with: 
+        directory: src/device-monitoring
+
   device-registry:  
     runs-on: ubuntu-latest
     continue-on-error: true
