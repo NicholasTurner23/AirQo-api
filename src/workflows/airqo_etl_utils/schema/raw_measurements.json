@@ -5,6 +5,11 @@
     "mode": "NULLABLE"
   },
   {
+    "name": "network",
+    "type": "STRING",
+    "mode": "NULLABLE"
+  },
+  {
     "name": "timestamp",
     "type": "TIMESTAMP",
     "mode": "NULLABLE"
@@ -121,6 +126,31 @@
   },
   {
     "name": "s2_voc",
+    "type": "FLOAT",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "tvoc",
+    "type": "FLOAT",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "co2",
+    "type": "FLOAT",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "hcho",
+    "type": "FLOAT",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "intaketemperature",
+    "type": "FLOAT",
+    "mode": "NULLABLE"
+  },
+  {
+    "name": "intakehumidity",
     "type": "FLOAT",
     "mode": "NULLABLE"
   },

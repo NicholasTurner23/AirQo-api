@@ -1,5 +1,3 @@
-import traceback
-
 import numpy as np
 import pandas as pd
 import requests
@@ -11,6 +9,10 @@ from .constants import Tenant, DataSource, Frequency, DeviceCategory
 from .data_validator import DataValidationUtils
 from .date import date_to_str
 from .utils import Utils
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class KccaUtils:
@@ -64,7 +66,7 @@ class KccaUtils:
                 }
             )
         except Exception as ex:
-            print(ex)
+            logger.exception(ex)
             return pd.Series({"site_id": None, "device_number": None})
 
     @staticmethod
@@ -111,7 +113,7 @@ class KccaUtils:
         )
 
         airqo_api = AirQoApi()
-        devices = airqo_api.get_devices(tenant=Tenant.KCCA)
+        devices = airqo_api.get_devices()
         data[["site_id", "device_number"]] = data["device_id"].apply(
             lambda device_id: KccaUtils.add_site_and_device_details(
                 devices=devices, device_id=device_id
@@ -140,7 +142,7 @@ class KccaUtils:
         data["timestamp"] = data["timestamp"].apply(pd.to_datetime)
         data["timestamp"] = data["timestamp"].apply(date_to_str)
         airqo_api = AirQoApi()
-        devices = airqo_api.get_devices(tenant=Tenant.KCCA)
+        devices = airqo_api.get_devices()
 
         for _, row in data.iterrows():
             device_id = row["device_id"]

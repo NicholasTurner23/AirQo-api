@@ -113,11 +113,13 @@ knowYourAirTaskSchema.statics = {
     try {
       const inclusionProjection = constants.KYA_TASKS_INCLUSION_PROJECTION;
       const exclusionProjection = constants.KYA_TASKS_EXCLUSION_PROJECTION(
-        filter.category ? filter.category : "none"
+        filter.path ? filter.path : "none"
       );
-      if (!isEmpty(filter.category)) {
-        delete filter.category;
+
+      if (!isEmpty(filter.path)) {
+        delete filter.path;
       }
+
       if (!isEmpty(filter.dashboard)) {
         delete filter.dashboard;
       }
@@ -298,11 +300,13 @@ knowYourAirTaskSchema.statics = {
 };
 
 const KnowYourAirTaskModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     let kyatasks = mongoose.model("kyatasks");
     return kyatasks;
   } catch (error) {
-    let kyatasks = getModelByTenant(tenant, "kyatask", knowYourAirTaskSchema);
+    let kyatasks = getModelByTenant(dbTenant, "kyatask", knowYourAirTaskSchema);
     return kyatasks;
   }
 };

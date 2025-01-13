@@ -2,11 +2,11 @@ app:
   name: airqo-stage-device-registry-api
   label: sta-device-reg
   namespace: staging
-  configmap: nv-device-registry-staging
+  configmap: env-device-registry-staging
 replicaCount: 2
 image:
   repository: eu.gcr.io/airqo-250220/airqo-stage-device-registry-api
-  tag: stage-d247a7c2-1718968406
+  tag: stage-4a24d391-1736401971
 nameOverride: ''
 fullnameOverride: ''
 podAnnotations: {}

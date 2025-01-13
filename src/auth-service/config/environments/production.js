@@ -26,5 +26,16 @@ const prodConfig = {
   KAFKA_CLIENT_GROUP: process.env.KAFKA_CLIENT_GROUP_PROD,
   REDIS_SERVER: process.env.PROD_REDIS_SERVER,
   REDIS_PORT: process.env.PROD_REDIS_PORT,
+  SELECTED_SITES: process.env.SELECTED_SITES_PRODUCTION
+    ? process.env.SELECTED_SITES_PRODUCTION.split(",").filter(
+        (value) => value.trim() !== ""
+      )
+    : [],
+  PADDLE_SUCCESS_REDIRECT_URL: process.env.PROD_PADDLE_SUCCESS_REDIRECT_URL,
+  PADDLE_CANCEL_REDIRECT_URL: process.env.PROD_PADDLE_CANCEL_REDIRECT_URL,
+  PADDLE_PUBLIC_KEY: process.env.PROD_PADDLE_PUBLIC_KEY,
+  PADDLE_SECRET_KEY: process.env.PROD_PADDLE_SECRET_KEY,
+  PADDLE_ENVIRONMENT: process.env.PROD_PADDLE_ENVIRONMENT,
+  PADDLE_API_KEY: process.env.PROD_PADDLE_API_KEY,
 };
 module.exports = prodConfig;

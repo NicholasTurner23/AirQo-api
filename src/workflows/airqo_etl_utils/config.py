@@ -35,6 +35,7 @@ class Config:
     BIGQUERY_HOURLY_WEATHER_TABLE = os.getenv("BIGQUERY_HOURLY_WEATHER_TABLE")
     BIGQUERY_OPENWEATHERMAP_TABLE = os.getenv("BIGQUERY_OPENWEATHERMAP_TABLE")
     BIGQUERY_ANALYTICS_TABLE = os.getenv("BIGQUERY_ANALYTICS_TABLE")
+    BIGQUERY_SATELLITE_DATA_TABLE = os.getenv("BIGQUERY_SATELLITE_DATA_TABLE")
 
     # Bam data
     BIGQUERY_RAW_BAM_DATA_TABLE = os.getenv("BIGQUERY_RAW_BAM_DATA_TABLE")
@@ -56,8 +57,10 @@ class Config:
 
     # Meta data
     BIGQUERY_DEVICES_TABLE = os.getenv("BIGQUERY_DEVICES_TABLE")
+    BIGQUERY_DEVICES_DEVICES_TABLE = os.getenv("BIGQUERY_DEVICES_DEVICES_TABLE")
     BIGQUERY_DEVICES_DATA_TABLE = os.getenv("BIGQUERY_DEVICES_DATA_TABLE")
     BIGQUERY_SITES_TABLE = os.getenv("BIGQUERY_SITES_TABLE")
+    BIGQUERY_SITES_SITES_TABLE = os.getenv("BIGQUERY_SITES_SITES_TABLE")
     BIGQUERY_SITES_META_DATA_TABLE = os.getenv("BIGQUERY_SITES_META_DATA_TABLE")
     BIGQUERY_AIRQLOUDS_TABLE = os.getenv("BIGQUERY_AIRQLOUDS_TABLE")
     BIGQUERY_AIRQLOUDS_SITES_TABLE = os.getenv("BIGQUERY_AIRQLOUDS_SITES_TABLE")
@@ -65,6 +68,9 @@ class Config:
     BIGQUERY_COHORTS_TABLE = os.getenv("BIGQUERY_COHORTS_TABLE")
     BIGQUERY_GRIDS_SITES_TABLE = os.getenv("BIGQUERY_GRIDS_SITES_TABLE")
     BIGQUERY_COHORTS_DEVICES_TABLE = os.getenv("BIGQUERY_COHORTS_DEVICES_TABLE")
+
+    # Data Checks
+    BIGQUERY_GX_RESULTS_TABLE = os.getenv("BIGQUERY_GX_RESULTS_TABLE")
 
     # AirQo
     POST_EVENTS_BODY_SIZE = os.getenv("POST_EVENTS_BODY_SIZE", 10)
@@ -91,8 +97,8 @@ class Config:
     OPEN_METEO_BASE_URL = os.getenv("OPEN_METEO_BASE_URL")
 
     # Kafka
-    BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:9092").split(",")
-    TOPIC_PARTITIONS = os.getenv("TOPIC_PARTITIONS", "1,2,3,4").split(",")
+    BOOTSTRAP_SERVERS = os.getenv("BOOTSTRAP_SERVERS", "localhost:9092")
+    TOPIC_PARTITIONS = os.getenv("TOPIC_PARTITIONS", "0,1,2").split(",")
     SCHEMA_REGISTRY_URL = os.getenv("SCHEMA_REGISTRY_URL")
 
     # Kafka Topics
@@ -100,6 +106,11 @@ class Config:
     INSIGHTS_MEASUREMENTS_TOPIC = os.getenv("INSIGHTS_MEASUREMENTS_TOPIC")
     HOURLY_MEASUREMENTS_TOPIC = os.getenv("HOURLY_MEASUREMENTS_TOPIC")
     BAM_MEASUREMENTS_TOPIC = os.getenv("BAM_MEASUREMENTS_TOPIC")
+    DEVICES_TOPIC = os.getenv("DEVICES_TOPIC")
+    CALIBRATED_HOURLY_MEASUREMENTS_TOPIC = os.getenv(
+        "CALIBRATED_HOURLY_MEASUREMENTS_TOPIC"
+    )
+    AVERAGED_HOURLY_MEASUREMENTS_TOPIC = os.getenv("AVERAGED_HOURLY_MEASUREMENTS_TOPIC")
 
     # Airnow
     AIRNOW_BASE_URL = os.getenv("AIRNOW_BASE_URL")
@@ -163,11 +174,44 @@ class Config:
         12: "status",
     }
 
+    AIRQO_BAM_MAPPING_NEW = {
+        "field8": {
+            0: "timestamp",
+            1: "realtime_conc",
+            2: "hourly_conc",
+            3: "short_time_conc",
+            4: "air_flow",
+            5: "wind_speed",
+            6: "wind_direction",
+            7: "temperature",
+            8: "humidity",
+            9: "barometric_pressure",
+            10: "filter_temperature",
+            11: "filter_humidity",
+            12: "status",
+        },
+    }
+
     AIRQO_BAM_MAPPING = {
         "hourly_conc": "pm2_5",
     }
 
+    # 1st 6 values are from the gps
     AIRQO_LOW_COST_CONFIG = {
+        0: "latitude",
+        1: "longitude",
+        2: "altitude",
+        3: "wind_speed",  # For mobile devices (Velocity)
+        4: "satellites",  # Number of satelites tracked
+        5: "hdop",  # For mobile devices
+        6: "device_temperature",  # Internal
+        7: "device_humidity",  # Internal
+        8: "temperature",  # Internal
+        9: "humidity",
+        10: "vapor_pressure",
+    }
+
+    AIRQO_LOW_COST_GAS_CONFIG = {
         0: "latitude",
         1: "longitude",
         2: "altitude",
@@ -179,6 +223,171 @@ class Config:
         8: "temperature",
         9: "humidity",
         10: "vapor_pressure",
+    }
+    AIRQO_LOW_COST_GAS_FIELD_MAPPING = {
+        "field1": "pm2_5",
+        "field2": "tvoc",
+        "field3": "hcho",
+        "field4": "co2",
+        "field5": "intaketemperature",
+        "field6": "intakehumidity",
+        "field7": "battery",
+        "created_at": "timestamp",
+        "field8": {
+            0: "latitude",
+            1: "longitude",
+            2: "altitude",
+            3: "wind_speed",  # For mobile devices (Velocity)
+            4: "satellites",  # Number of satelites tracked
+            5: "hdop",  # For mobile devices
+            6: "device_temperature",  # Internal
+            7: "device_humidity",  # Internal
+            8: "temperature",  # Internal
+            9: "humidity",
+            10: "vapor_pressure",
+        },
+    }
+
+    AIRQO_LOW_COST_FIELD_MAPPING = {
+        "field1": "s1_pm2_5",
+        "field2": "s1_pm10",
+        "field3": "s2_pm2_5",
+        "field4": "s2_pm10",
+        "field7": "battery",
+        "created_at": "timestamp",
+        "field8": {
+            0: "latitude",
+            1: "longitude",
+            2: "altitude",
+            3: "wind_speed",  # For mobile devices (Velocity)
+            4: "satellites",  # Number of satelites tracked
+            5: "hdop",  # For mobile devices
+            6: "device_temperature",  # Internal
+            7: "device_humidity",  # Internal
+            8: "temperature",  # Internal
+            9: "humidity",
+            10: "vapor_pressure",
+        },
+    }
+    URBANBETTER_LOW_COST_FIELD_MAPPING = {
+        "pollutants.no2.value": "no2",
+        "pollutants.voc.value": "voc",
+        "pollutants.pm25.value": "pm2_5",
+        "pollutants.pm10.value": "pm10",
+        "pollutants.pm1.value": "pm1",
+        "pollutants.no2.pi": "no2_pi",
+        "pollutants.voc.pi": "voc_pi",
+        "pollutants.pm25.pi": "pm2_5_pi",
+        "pollutants.pm10.pi": "pm10_pi",
+        "pollutants.pm1.pi": "pm1_pi",
+        "date": "timestamp",
+    }
+
+    IQAIR_LOW_COST_FIELD_MAPPING = {
+        "pm25": {"key": "pm2_5", "value": "conc"},
+        "pm10": {"key": "pm10", "value": "conc"},
+        "pm1": {"key": "pm1", "value": "conc"},
+        "pr": "pressure",
+        "hm": "humidity",
+        "tp": "temperature",
+        "ts": "timestamp",
+    }
+
+    DATA_RESOLUTION_MAPPING = {
+        "iqair": {"hourly": "instant", "raw": "instant", "current": "current"}
+    }
+
+    AIRQO_DATA_COLUMN_NAME_MAPPING = {
+        "pm2_5": "pm2_5",
+        "s1_pm2_5": "pm2_5",
+        "s2_pm2_5": "pm2_5",
+        "pm2_5_pi": "pm2_5",
+        "pm2_5_raw_value": "pm2_5",
+        "pm2_5_calibrated_value": "pm2_5",
+        "pm10": "pm10",
+        "s1_pm10": "pm10",
+        "s2_pm10": "pm10",
+        "pm10_pi": "pm10",
+        "pm10_raw_value": "pm10",
+        "pm10_calibrated_value": "pm10",
+        "device_humidity": "humidity",
+        "humidity": "humidity",
+        "device_temperature": "temperature",
+        "temperature": "temperature",
+        "no2": "no2",
+        "no2_raw_value": "no2",
+        "no2_calibrated_value": "no2",
+        "pm1": "pm1",
+        "pm1_raw_value": "pm1",
+        "pm1_pi": "pm1",
+    }
+
+    device_config_mapping = {
+        "bam": {
+            "field_8_cols": list(AIRQO_BAM_MAPPING_NEW.get("field8", {}).values()),
+            "mapping": {"airqo": AIRQO_BAM_MAPPING_NEW},
+            "other_fields_cols": [],
+        },
+        "gas": {
+            "field_8_cols": list(
+                AIRQO_LOW_COST_GAS_FIELD_MAPPING.get("field8", {}).values()
+            ),
+            "mapping": {"airqo": AIRQO_LOW_COST_GAS_FIELD_MAPPING},
+            "other_fields_cols": [
+                "pm2_5",
+                "tvoc",
+                "hcho",
+                "co2",
+                "intaketemperature",
+                "intakehumidity",
+                "battery",
+            ],
+        },
+        "lowcost": {
+            "field_8_cols": list(
+                AIRQO_LOW_COST_FIELD_MAPPING.get("field8", {}).values()
+            ),
+            "mapping": {
+                "airqo": AIRQO_LOW_COST_FIELD_MAPPING,
+                "iqair": IQAIR_LOW_COST_FIELD_MAPPING,
+            },
+            "other_fields_cols": [
+                "s1_pm2_5",
+                "s1_pm10",
+                "s2_pm2_5",
+                "s2_pm10",
+                "battery",
+            ],
+        },
+    }
+
+    # Schema files mapping
+    SCHEMA_FILE_MAPPING = {
+        BIGQUERY_HOURLY_EVENTS_TABLE: "measurements.json",
+        BIGQUERY_DAILY_EVENTS_TABLE: "measurements.json",
+        BIGQUERY_RAW_EVENTS_TABLE: "raw_measurements.json",
+        BIGQUERY_HOURLY_WEATHER_TABLE: "weather_data.json",
+        BIGQUERY_RAW_WEATHER_TABLE: "weather_data.json",
+        BIGQUERY_LATEST_EVENTS_TABLE: "latest_measurements.json",
+        BIGQUERY_ANALYTICS_TABLE: "data_warehouse.json",
+        BIGQUERY_AIRQLOUDS_TABLE: "airqlouds.json",
+        BIGQUERY_AIRQLOUDS_SITES_TABLE: "airqlouds_sites.json",
+        BIGQUERY_GRIDS_TABLE: "grids.json",
+        BIGQUERY_COHORTS_TABLE: "cohorts.json",
+        BIGQUERY_GRIDS_SITES_TABLE: "grids_sites.json",
+        BIGQUERY_COHORTS_DEVICES_TABLE: "cohorts_devices.json",
+        BIGQUERY_SITES_TABLE: "sites.json",
+        BIGQUERY_SITES_SITES_TABLE: "sites.json",
+        BIGQUERY_SITES_META_DATA_TABLE: "sites_meta_data.json",
+        SENSOR_POSITIONS_TABLE: "sensor_positions.json",
+        BIGQUERY_DEVICES_TABLE: "devices.json",
+        BIGQUERY_DEVICES_DEVICES_TABLE: "devices.json",
+        BIGQUERY_CLEAN_RAW_MOBILE_EVENTS_TABLE: "mobile_measurements.json",
+        BIGQUERY_UNCLEAN_RAW_MOBILE_EVENTS_TABLE: "mobile_measurements.json",
+        BIGQUERY_AIRQO_MOBILE_EVENTS_TABLE: "airqo_mobile_measurements.json",
+        BIGQUERY_BAM_EVENTS_TABLE: "bam_measurements.json",
+        BIGQUERY_RAW_BAM_DATA_TABLE: "bam_raw_measurements.json",
+        "all": None,
     }
 
     # Data unit tests
@@ -196,6 +405,7 @@ class Config:
     )
     HOURLY_FORECAST_HORIZON = os.getenv("HOURLY_FORECAST_HORIZON")
     DAILY_FORECAST_HORIZON = os.getenv("DAILY_FORECAST_HORIZON")
+    SATELLITE_TRAINING_SCOPE = os.getenv("SATELLITE_TRAINING_SCOPE")
     MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
     FORECAST_MODELS_BUCKET = os.getenv("FORECAST_MODELS_BUCKET")
     MONGO_URI = os.getenv("MONGO_URI")

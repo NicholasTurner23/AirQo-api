@@ -7,6 +7,7 @@ const { HttpError } = require("@utils/errors");
 const { monthsInfront } = require("@utils/date");
 const constants = require("@config/constants");
 const cryptoJS = require("crypto-js");
+const stringify = require("@utils/stringify");
 const isEmpty = require("is-empty");
 const log4js = require("log4js");
 const logger = log4js.getLogger(`${constants.ENVIRONMENT} -- device-model`);
@@ -23,7 +24,26 @@ const minLength = [
 
 const noSpaces = /^\S*$/;
 
+const DEVICE_CONFIG = {
+  ALLOWED_CATEGORIES: ["bam", "lowcost", "gas"],
+};
+
 const accessCodeGenerator = require("generate-password");
+
+function sanitizeObject(obj, invalidKeys) {
+  invalidKeys.forEach((key) => {
+    if (obj.hasOwnProperty(key)) {
+      delete obj[key];
+    }
+  });
+  return obj;
+}
+
+const DEVICE_CATEGORIES = Object.freeze({
+  GAS: "gas",
+  LOWCOST: "lowcost",
+  BAM: "bam",
+});
 
 const deviceSchema = new mongoose.Schema(
   {
@@ -58,9 +78,24 @@ const deviceSchema = new mongoose.Schema(
       trim: true,
       required: [true, "the network is required!"],
     },
-    group: {
+    groups: {
+      type: [String],
+      trim: true,
+    },
+    serial_number: {
       type: String,
       trim: true,
+      unique: true,
+    },
+    authRequired: {
+      type: Boolean,
+      trim: true,
+      default: true,
+    },
+    api_code: {
+      type: String,
+      trim: true,
+      unique: true,
     },
     access_code: {
       type: String,
@@ -95,6 +130,12 @@ const deviceSchema = new mongoose.Schema(
     },
     createdAt: {
       type: Date,
+    },
+    lastActive: { type: Date },
+    isOnline: {
+      type: Boolean,
+      trim: true,
+      default: false,
     },
     generation_version: {
       type: Number,
@@ -182,6 +223,7 @@ const deviceSchema = new mongoose.Schema(
     category: {
       type: String,
       default: "lowcost",
+      enum: Object.values(DEVICE_CATEGORIES),
       trim: true,
     },
     isActive: {
@@ -199,52 +241,212 @@ deviceSchema.plugin(uniqueValidator, {
   message: `{VALUE} must be unique!`,
 });
 
-deviceSchema.post("save", async function(doc) {});
-
-deviceSchema.pre("save", function(next) {
-  if (this.isModified("name")) {
-    if (this.writeKey && this.readKey) {
-      this.writeKey = this._encryptKey(this.writeKey);
-      this.readKey = this._encryptKey(this.readKey);
-    }
-    let n = this.name;
-  }
-
-  this.device_codes = [this._id, this.name];
-  if (this.device_number) {
-    this.device_codes.push(this.device_number);
-  }
-  if (this.alias) {
-    this.device_codes.push(this.alias);
-  }
-
-  // Check for duplicate values in the grids array
-  const duplicateValues = this.cohorts.filter(
+const checkDuplicates = (arr, fieldName) => {
+  const duplicateValues = arr.filter(
     (value, index, self) => self.indexOf(value) !== index
   );
+
   if (duplicateValues.length > 0) {
-    const error = new Error("Duplicate values found in cohorts array.");
-    return next(error);
+    return new HttpError(
+      `Duplicate values found in ${fieldName} array.`,
+      httpStatus.BAD_REQUEST
+    );
   }
+  return null;
+};
 
-  return next();
-});
+deviceSchema.pre(
+  [
+    "update",
+    "findByIdAndUpdate",
+    "updateMany",
+    "updateOne",
+    "save",
+    "findOneAndUpdate",
+  ],
+  async function(next) {
+    try {
+      // Determine if this is a new document or an update
+      const isNew = this.isNew;
+      const updateData = this.getUpdate ? this.getUpdate() : this;
 
-deviceSchema.pre("update", function(next) {
-  if (this.isModified("name")) {
-    let n = this.name;
+      // Handle category field for both new documents and updates
+      if (isNew) {
+        // For new documents
+        if ("category" in this) {
+          if (this.category === null) {
+            delete this.category;
+          } else if (
+            !DEVICE_CONFIG.ALLOWED_CATEGORIES.includes(this.category)
+          ) {
+            return next(
+              new HttpError(
+                `Invalid category. Must be one of: ${DEVICE_CONFIG.ALLOWED_CATEGORIES.join(
+                  ", "
+                )}`,
+                httpStatus.BAD_REQUEST
+              )
+            );
+          }
+        }
+      } else {
+        // For updates
+        if ("category" in updateData) {
+          if (updateData.category === null) {
+            delete updateData.category;
+          } else if (
+            !DEVICE_CONFIG.ALLOWED_CATEGORIES.includes(updateData.category)
+          ) {
+            return next(
+              new HttpError(
+                `Invalid category. Must be one of: ${DEVICE_CONFIG.ALLOWED_CATEGORIES.join(
+                  ", "
+                )}`,
+                httpStatus.BAD_REQUEST
+              )
+            );
+          }
+        }
+      }
+
+      if (isNew) {
+        // Set default network if not provided
+        if (!this.network) {
+          this.network = constants.DEFAULT_NETWORK;
+        }
+
+        // Manage serial_number based on device_number and network
+        if (this.network === "airqo" && this.device_number) {
+          this.serial_number = String(this.device_number); // Assign device_number as a string
+        } else if (!this.serial_number && this.network !== "airqo") {
+          next(
+            new HttpError(
+              "Devices not part of the AirQo network must include a serial_number as a string.",
+              httpStatus.BAD_REQUEST
+            )
+          );
+        }
+
+        // Generate name based on generation version and count
+        if (this.generation_version && this.generation_count) {
+          this.name = `aq_g${this.generation_version}_${this.generation_count}`;
+        }
+
+        // Handle alias generation
+        if (!this.alias && (this.long_name || this.name)) {
+          this.alias = (this.long_name || this.name).trim().replace(/ /g, "_");
+          if (!this.alias) {
+            return next(
+              new HttpError(
+                "Unable to generate ALIAS for the device.",
+                httpStatus.INTERNAL_SERVER_ERROR
+              )
+            );
+          }
+        }
+
+        // Sanitize name
+        const sanitizeName = (name) => {
+          return name
+            .replace(/[^a-zA-Z0-9]/g, "_")
+            .slice(0, 41)
+            .trim()
+            .toLowerCase();
+        };
+
+        if (this.name) {
+          this.name = sanitizeName(this.name);
+        } else if (this.long_name) {
+          this.name = sanitizeName(this.long_name);
+        }
+
+        // Set long_name if not provided
+        if (!this.long_name && this.name) {
+          this.long_name = this.name;
+        }
+
+        // Encrypt keys if modified
+        if (this.isModified("name") && this.writeKey && this.readKey) {
+          this.writeKey = this._encryptKey(this.writeKey);
+          this.readKey = this._encryptKey(this.readKey);
+        }
+
+        // Generate device codes
+        this.device_codes = [this._id, this.name];
+        if (this.device_number) {
+          this.device_codes.push(this.device_number);
+        }
+        if (this.alias) {
+          this.device_codes.push(this.alias);
+        }
+        if (this.serial_number) {
+          this.device_codes.push(this.serial_number);
+        }
+
+        // Check for duplicates in cohorts
+        const cohortsDuplicateError = checkDuplicates(this.cohorts, "cohorts");
+        if (cohortsDuplicateError) {
+          return next(cohortsDuplicateError);
+        }
+
+        // Check for duplicates in groups
+        const groupsDuplicateError = checkDuplicates(this.groups, "groups");
+        if (groupsDuplicateError) {
+          return next(groupsDuplicateError);
+        }
+      }
+
+      // Handling the network condition
+      if (updateData.network === "airqo") {
+        if (updateData.device_number) {
+          updateData.serial_number = String(updateData.device_number);
+        } else if (updateData.serial_number) {
+          updateData.device_number = Number(updateData.serial_number);
+        }
+      }
+
+      // Sanitize name if modified
+      if (updateData.name) {
+        const sanitizeName = (name) => {
+          return name
+            .replace(/[^a-zA-Z0-9]/g, "_")
+            .slice(0, 41)
+            .trim()
+            .toLowerCase();
+        };
+        updateData.name = sanitizeName(updateData.name);
+      }
+
+      // Generate access code if present in update
+      if (updateData.access_code) {
+        const access_code = accessCodeGenerator.generate({
+          length: 16,
+          excludeSimilarCharacters: true,
+        });
+        updateData.access_code = access_code.toUpperCase();
+      }
+
+      // Handle array fields using $addToSet
+      const arrayFieldsToAddToSet = [
+        "device_codes",
+        "previous_sites",
+        "groups",
+        "pictures",
+      ];
+      arrayFieldsToAddToSet.forEach((field) => {
+        if (updateData[field]) {
+          updateData.$addToSet = updateData.$addToSet || {};
+          updateData.$addToSet[field] = { $each: updateData[field] };
+          delete updateData[field];
+        }
+      });
+
+      next();
+    } catch (error) {
+      return next(error);
+    }
   }
-  return next();
-});
-
-deviceSchema.pre("findByIdAndUpdate", function(next) {
-  this.options.runValidators = true;
-  if (this.isModified("name")) {
-    let n = this.name;
-  }
-  return next();
-});
-
+);
 deviceSchema.methods = {
   _encryptKey(key) {
     let encryptedKey = cryptoJS.AES.encrypt(
@@ -260,7 +462,10 @@ deviceSchema.methods = {
       alias: this.alias,
       mobility: this.mobility,
       network: this.network,
-      group: this.group,
+      groups: this.groups,
+      api_code: this.api_code,
+      serial_number: this.serial_number,
+      authRequired: this.authRequired,
       long_name: this.long_name,
       latitude: this.latitude,
       longitude: this.longitude,
@@ -283,6 +488,8 @@ deviceSchema.methods = {
       mountType: this.mountType,
       isActive: this.isActive,
       writeKey: this.writeKey,
+      lastActive: this.lastActive,
+      isOnline: this.isOnline,
       isRetired: this.isRetired,
       readKey: this.readKey,
       pictures: this.pictures,
@@ -300,123 +507,11 @@ deviceSchema.methods = {
 deviceSchema.statics = {
   async register(args, next) {
     try {
-      let modifiedArgs = Object.assign({}, args);
+      const createdDevice = await this.create(args);
 
-      if (isEmpty(modifiedArgs.network)) {
-        modifiedArgs.network = constants.DEFAULT_NETWORK;
-      }
-
-      if (
-        !isEmpty(modifiedArgs.generation_version) &&
-        !isEmpty(modifiedArgs.generation_count)
-      ) {
-        modifiedArgs.name = `aq_g${modifiedArgs.generation_version}_${modifiedArgs.generation_count}`;
-      }
-
-      if (!isEmpty(modifiedArgs.name) || !isEmpty(modifiedArgs.long_name)) {
-        try {
-          let alias = modifiedArgs.long_name
-            ? modifiedArgs.long_name
-            : modifiedArgs.name;
-          if (!isEmpty(alias)) {
-            modifiedArgs.alias = alias.trim().replace(/ /g, "_");
-          } else if (isEmpty(alias)) {
-            next(
-              new HttpError(
-                "Internal Server Error",
-                httpStatus.INTERNAL_SERVER_ERROR,
-                { message: "unable to generate the ALIAS for the device" }
-              )
-            );
-          }
-        } catch (error) {
-          logger.error(
-            `internal server error -- sanitise ALIAS -- ${error.message}`
-          );
-          next(
-            new HttpError(
-              "Internal Server Error",
-              httpStatus.INTERNAL_SERVER_ERROR,
-              { message: error.message }
-            )
-          );
-        }
-      }
-
-      if (!isEmpty(modifiedArgs.name)) {
-        try {
-          let nameWithoutWhiteSpaces = modifiedArgs.name.replace(
-            /[^a-zA-Z0-9]/g,
-            "_"
-          );
-          let shortenedName = nameWithoutWhiteSpaces.slice(0, 41);
-          modifiedArgs.name = shortenedName.trim().toLowerCase();
-        } catch (error) {
-          logger.error(
-            `internal server error -- sanitise NAME -- ${error.message}`
-          );
-          next(
-            new HttpError(
-              "Internal Server Error",
-              httpStatus.INTERNAL_SERVER_ERROR,
-              { message: error.message }
-            )
-          );
-        }
-      }
-
-      if (!isEmpty(modifiedArgs.long_name && isEmpty(modifiedArgs.name))) {
-        try {
-          let nameWithoutWhiteSpaces = modifiedArgs.long_name.replace(
-            /[^a-zA-Z0-9]/g,
-            "_"
-          );
-          let shortenedName = nameWithoutWhiteSpaces.slice(0, 41);
-          modifiedArgs.name = shortenedName.trim().toLowerCase();
-        } catch (error) {
-          logger.error(
-            `internal server error -- sanitiseName-- ${error.message}`
-          );
-          next(
-            new HttpError(
-              "Internal Server Error",
-              httpStatus.INTERNAL_SERVER_ERROR,
-              { message: error.message }
-            )
-          );
-        }
-      }
-
-      if (isEmpty(modifiedArgs.long_name && !isEmpty(modifiedArgs.name))) {
-        try {
-          modifiedArgs.long_name = modifiedArgs.name;
-        } catch (error) {
-          logger.error(
-            `internal server error -- sanitiseName-- ${error.message}`
-          );
-          next(
-            new HttpError(
-              "Internal Server Error",
-              httpStatus.INTERNAL_SERVER_ERROR,
-              { message: error.message }
-            )
-          );
-        }
-      }
-
-      let createdDevice = await this.create({
-        ...modifiedArgs,
-      });
-      if (!isEmpty(createdDevice)) {
-        return {
-          success: true,
-          message: "successfully created the device",
-          data: createdDevice._doc,
-          status: httpStatus.CREATED,
-        };
-      } else {
-        logger.error("operation successful but device is not created");
-        next(
+      if (!createdDevice) {
+        logger.error("Operation successful but device is not created");
+        return next(
           new HttpError(
             "Internal Server Error",
             httpStatus.INTERNAL_SERVER_ERROR,
@@ -424,33 +519,52 @@ deviceSchema.statics = {
           )
         );
       }
-      logger.warn("operation successful but device is not created");
+
+      return {
+        success: true,
+        message: "Successfully created the device",
+        data: createdDevice._doc,
+        status: httpStatus.CREATED,
+      };
     } catch (error) {
-      logObject("the error in the Device Model", error);
-      logger.error(`🐛🐛 Internal Server Error -- ${JSON.stringify(error)}`);
+      logObject("The error in the Device Model", error);
+      logger.error(`🐛🐛 Internal Server Error -- ${stringify(error)}`);
+
       let response = {};
-      let message = "validation errors for some of the provided fields";
-      let status = httpStatus.CONFLICT;
-      if (error.errors) {
+      let message = "Validation errors for some of the provided fields";
+
+      // Check if the error is an instance of HttpError
+      if (error instanceof HttpError) {
+        // Log the HTTP error details
+        logger.error(
+          `HTTP Error: ${error.message}, Status: ${error.statusCode}`
+        );
+        response.message = error.message; // Use the message from HttpError
+        response.details = error.details || {}; // Capture additional details if available
+      } else if (error.errors) {
+        // Handle validation errors
         Object.entries(error.errors).forEach(([key, value]) => {
-          response.message = value.message;
-          response[key] = value.message;
-          return response;
+          response[key] = value.message; // Capture specific field errors
         });
+      } else {
+        // Fallback for unexpected errors
+        response.message = "An unexpected error occurred.";
       }
-      next(new HttpError(message, status, response));
+
+      return next(new HttpError(message, httpStatus.CONFLICT, response));
     }
   },
   async list({ _skip = 0, _limit = 1000, filter = {} } = {}, next) {
     try {
       const inclusionProjection = constants.DEVICES_INCLUSION_PROJECTION;
       const exclusionProjection = constants.DEVICES_EXCLUSION_PROJECTION(
-        filter.category ? filter.category : "none"
+        filter.path ? filter.path : "none"
       );
 
-      if (!isEmpty(filter.category)) {
-        delete filter.category;
+      if (!isEmpty(filter.path)) {
+        delete filter.path;
       }
+
       if (!isEmpty(filter.dashboard)) {
         delete filter.dashboard;
       }
@@ -483,6 +597,12 @@ deviceSchema.statics = {
           foreignField: "_id",
           as: "cohorts",
         })
+        .lookup({
+          from: "grids",
+          localField: "site.grids",
+          foreignField: "_id",
+          as: "grids",
+        })
         .sort({ createdAt: -1 })
         .project(inclusionProjection)
         .project(exclusionProjection)
@@ -508,7 +628,7 @@ deviceSchema.statics = {
       }
     } catch (error) {
       logObject("error", error);
-      logger.error(`🐛🐛 Internal Server Error -- ${JSON.stringify(error)}`);
+      logger.error(`🐛🐛 Internal Server Error -- ${stringify(error)}`);
       next(
         new HttpError(
           "Internal Server Error",
@@ -520,70 +640,108 @@ deviceSchema.statics = {
   },
   async modify({ filter = {}, update = {}, opts = {} } = {}, next) {
     try {
-      let modifiedUpdate = Object.assign({}, update);
-      modifiedUpdate["$addToSet"] = {};
-      delete modifiedUpdate.name;
-      delete modifiedUpdate.device_number;
-      delete modifiedUpdate._id;
-      delete modifiedUpdate.generation_count;
-      delete modifiedUpdate.generation_version;
-      delete modifiedUpdate.network;
-      let options = { new: true, projected: modifiedUpdate, ...opts };
+      logText("we are now inside the modify function for devices....");
+      const invalidKeys = ["name", "_id", "writeKey", "readKey"];
+      const sanitizedUpdate = sanitizeObject(update, invalidKeys);
 
-      if (!isEmpty(modifiedUpdate.access_code)) {
+      const options = { new: true, ...opts };
+
+      if (sanitizedUpdate.access_code) {
         const access_code = accessCodeGenerator.generate({
           length: 16,
           excludeSimilarCharacters: true,
         });
-        modifiedUpdate.access_code = access_code.toUpperCase();
-      }
-
-      if (modifiedUpdate.device_codes) {
-        modifiedUpdate["$addToSet"]["device_codes"] = {};
-        modifiedUpdate["$addToSet"]["device_codes"]["$each"] =
-          modifiedUpdate.device_codes;
-        delete modifiedUpdate["device_codes"];
-      }
-
-      if (modifiedUpdate.previous_sites) {
-        modifiedUpdate["$addToSet"]["previous_sites"] = {};
-        modifiedUpdate["$addToSet"]["previous_sites"]["$each"] =
-          modifiedUpdate.previous_sites;
-        delete modifiedUpdate["previous_sites"];
-      }
-
-      if (modifiedUpdate.pictures) {
-        modifiedUpdate["$addToSet"]["pictures"] = {};
-        modifiedUpdate["$addToSet"]["pictures"]["$each"] =
-          modifiedUpdate.pictures;
-        delete modifiedUpdate["pictures"];
+        sanitizedUpdate.access_code = access_code.toUpperCase();
       }
 
       const updatedDevice = await this.findOneAndUpdate(
         filter,
-        modifiedUpdate,
+        sanitizedUpdate,
         options
       );
 
-      if (!isEmpty(updatedDevice)) {
+      if (updatedDevice) {
         let data = updatedDevice._doc;
-        delete data.__v;
+        delete data.__v; // Exclude version key from response
         return {
           success: true,
-          message: "successfully modified the device",
+          message: "Successfully modified the device",
           data,
           status: httpStatus.OK,
         };
-      } else if (isEmpty(updatedDevice)) {
+      } else {
         next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
-            message: "device does not exist, please crosscheck",
+            message: "Device does not exist, please crosscheck",
           })
         );
       }
     } catch (error) {
       logObject("the error", error);
       logger.error(`🐛🐛 Internal Server Error -- ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          {
+            message: error.message,
+          }
+        )
+      );
+    }
+  },
+  async bulkModify({ filter = {}, update = {}, opts = {} }, next) {
+    try {
+      // Sanitize update object
+      const invalidKeys = ["name", "_id", "writeKey", "readKey"];
+      const sanitizedUpdate = sanitizeObject(update, invalidKeys);
+
+      // Handle special cases like access code generation
+      if (sanitizedUpdate.access_code) {
+        sanitizedUpdate.access_code = accessCodeGenerator
+          .generate({
+            length: 16,
+            excludeSimilarCharacters: true,
+          })
+          .toUpperCase();
+      }
+
+      // Perform bulk update with additional options
+      const bulkUpdateResult = await this.updateMany(
+        filter,
+        { $set: sanitizedUpdate },
+        {
+          new: true,
+          runValidators: true,
+          ...opts,
+        }
+      );
+
+      if (bulkUpdateResult.nModified > 0) {
+        return {
+          success: true,
+          message: `Successfully modified ${bulkUpdateResult.nModified} devices`,
+          data: {
+            modifiedCount: bulkUpdateResult.nModified,
+            matchedCount: bulkUpdateResult.n,
+          },
+          status: httpStatus.OK,
+        };
+      } else {
+        return {
+          success: false,
+          message: "No devices were updated",
+          data: {
+            modifiedCount: 0,
+            matchedCount: bulkUpdateResult.n,
+          },
+          status: httpStatus.NOT_FOUND,
+        };
+      }
+    } catch (error) {
+      logObject("Bulk update error", error);
+      logger.error(`🐛🐛 Bulk Modify Error -- ${error.message}`);
+
       next(
         new HttpError(
           "Internal Server Error",
@@ -598,12 +756,6 @@ deviceSchema.statics = {
       logObject("the filter", filter);
       let options = { new: true };
       let modifiedUpdate = update;
-      delete modifiedUpdate.name;
-      delete modifiedUpdate.device_number;
-      delete modifiedUpdate._id;
-      delete modifiedUpdate.generation_count;
-      delete modifiedUpdate.generation_version;
-
       validKeys = ["writeKey", "readKey"];
       Object.keys(modifiedUpdate).forEach(
         (key) => validKeys.includes(key) || delete modifiedUpdate[key]
@@ -663,6 +815,8 @@ deviceSchema.statics = {
           _id: 1,
           name: 1,
           device_number: 1,
+          serial_number: 1,
+          device_codes: 1,
           long_name: 1,
           category: 1,
         },
@@ -699,11 +853,13 @@ deviceSchema.statics = {
 };
 
 const DeviceModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     let devices = mongoose.model("devices");
     return devices;
   } catch (error) {
-    let devices = getModelByTenant(tenant, "device", deviceSchema);
+    let devices = getModelByTenant(dbTenant, "device", deviceSchema);
     return devices;
   }
 };

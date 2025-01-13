@@ -18,8 +18,8 @@ const photoSchema = new Schema(
       type: String,
       trim: true,
     },
-    group: {
-      type: String,
+    groups: {
+      type: [String],
       trim: true,
     },
     device_id: {
@@ -83,7 +83,7 @@ photoSchema.methods = {
       tags: this.tags,
       name: this.name,
       network: this.network,
-      group: this.group,
+      groups: this.groups,
       image_url: this.image_url,
       device_id: this.device_id,
       site_id: this.site_id,
@@ -158,7 +158,7 @@ photoSchema.statics = {
           description: 1,
           metadata: 1,
           network: 1,
-          group: 1,
+          groups: 1,
         })
         .skip(skip ? skip : 0)
         .limit(limit ? limit : 1000)
@@ -332,11 +332,13 @@ photoSchema.statics = {
 };
 
 const PhotoModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     const photos = mongoose.model("photos");
     return photos;
   } catch (error) {
-    const photos = getModelByTenant(tenant, "photo", photoSchema);
+    const photos = getModelByTenant(dbTenant, "photo", photoSchema);
     return photos;
   }
 };

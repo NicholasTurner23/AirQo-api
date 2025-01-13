@@ -2,7 +2,12 @@ const EventModel = require("@models/Event");
 const ReadingModel = require("@models/Reading");
 const SignalModel = require("@models/Signal");
 const DeviceModel = require("@models/Device");
-const { logObject, logElement, logText } = require("./log");
+const {
+  logObject,
+  logElement,
+  logText,
+  logTextWithTimestamp,
+} = require("./log");
 const constants = require("@config/constants");
 const generateFilter = require("./generate-filter");
 const isEmpty = require("is-empty");
@@ -31,7 +36,7 @@ const util = require("util");
 const redisGetAsync = util.promisify(redis.get).bind(redis);
 const redisSetAsync = util.promisify(redis.set).bind(redis);
 const redisExpireAsync = util.promisify(redis.expire).bind(redis);
-const jsonify = require("@utils/jsonify");
+const stringify = require("@utils/stringify");
 const asyncRetry = require("async-retry");
 
 const listDevices = async (request, next) => {
@@ -52,7 +57,7 @@ const listDevices = async (request, next) => {
         ? responseFromListDevice.errors
         : { message: "" };
       try {
-        let errorsString = errors ? jsonify(errors) : "";
+        let errorsString = errors ? stringify(errors) : "";
         logger.error(
           `responseFromListDevice was not a success -- ${responseFromListDevice.message} -- ${errorsString}`
         );
@@ -141,13 +146,13 @@ async function transformManyReadings(request, next) {
         next
       );
       if (responseFromTransformEvent.success === true) {
-        logger.info(`Transformed event: ${JSON.jsonify(event)}`);
+        logger.info(`Transformed event: ${JSON.stringify(event)}`);
         return responseFromTransformEvent;
       } else if (responseFromTransformEvent.success === false) {
         let errors = responseFromTransformEvent.errors
           ? responseFromTransformEvent.errors
           : { message: "" };
-        logger.error(`Failed to transform event -- ${jsonify(errors)}`);
+        logger.error(`Failed to transform event -- ${stringify(errors)}`);
         return responseFromTransformEvent;
       }
     });
@@ -315,6 +320,135 @@ async function processEvents(events, next) {
   return determineResponse(nAdded, eventsAdded, eventsRejected, errors);
 }
 
+class AirQualityService {
+  constructor(tenant) {
+    this.EventModel = EventModel(tenant);
+  }
+
+  async getAirQualityData(request, next, version = "v1") {
+    const { language, site_id } = { ...request.query, ...request.params };
+    let responseFromListEvents;
+
+    try {
+      // Try to get from cache first
+      const cacheResult = await this.tryGetCache(request, next);
+      if (cacheResult.success) {
+        return cacheResult.data;
+      }
+
+      // Get data based on version
+      responseFromListEvents =
+        version === "v2"
+          ? await this.EventModel.v2_getAirQualityAverages(site_id, next)
+          : await this.EventModel.getAirQualityAverages(site_id, next);
+
+      // Handle translation if needed (only for v1 as v2 doesn't include health tips)
+      if (version === "v1") {
+        await this.translateHealthTips(responseFromListEvents, language, next);
+      }
+
+      // Set cache if successful
+      if (responseFromListEvents.success) {
+        await this.trySetCache(responseFromListEvents.data, request, next);
+
+        return {
+          success: true,
+          message: isEmpty(responseFromListEvents.data)
+            ? "no measurements for this search"
+            : responseFromListEvents.message,
+          data: responseFromListEvents.data,
+          status: responseFromListEvents.status || "",
+          isCache: false,
+        };
+      }
+
+      logger.error(
+        `Unable to retrieve events --- ${JSON.stringify(
+          responseFromListEvents.errors
+        )}`
+      );
+      return {
+        success: false,
+        message: responseFromListEvents.message,
+        errors: responseFromListEvents.errors || { message: "" },
+        status: responseFromListEvents.status || "",
+        isCache: false,
+      };
+    } catch (error) {
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+    }
+  }
+
+  async translateHealthTips(response, language, next) {
+    if (
+      language !== undefined &&
+      !isEmpty(response) &&
+      response.success === true &&
+      !isEmpty(response.data)
+    ) {
+      const data = response.data;
+      for (const event of data) {
+        const translatedHealthTips = await translateUtil.translateTips(
+          { healthTips: event.health_tips, targetLanguage: language },
+          next
+        );
+        if (translatedHealthTips.success === true) {
+          event.health_tips = translatedHealthTips.data;
+        }
+      }
+    }
+  }
+
+  async tryGetCache(request, next) {
+    try {
+      return await Promise.race([
+        createEvent.getCache(request, next),
+        this.getCacheTimeout(),
+      ]);
+    } catch (error) {
+      logger.error(`🐛🐛 Cache Get Error -- ${JSON.stringify(error)}`);
+      return { success: false };
+    }
+  }
+
+  async trySetCache(data, request, next) {
+    try {
+      const result = await Promise.race([
+        createEvent.setCache(data, request, next),
+        this.getCacheTimeout(),
+      ]);
+
+      if (!result.success) {
+        logger.error(
+          `🐛🐛 Cache Set Error -- ${JSON.stringify(
+            result.errors || "Unknown error"
+          )}`
+        );
+      }
+    } catch (error) {
+      logger.error(`🐛🐛 Cache Set Error -- ${JSON.stringify(error)}`);
+    }
+  }
+
+  getCacheTimeout() {
+    return new Promise((resolve) =>
+      setTimeout(resolve, 60000, {
+        success: false,
+        message: "Internal Server Error",
+        status: httpStatus.INTERNAL_SERVER_ERROR,
+        errors: { message: "Cache timeout" },
+      })
+    );
+  }
+}
+
 const createEvent = {
   getMeasurementsFromBigQuery: async (req, next) => {
     try {
@@ -355,7 +489,7 @@ const createEvent = {
       } else if (responseFromGetDeviceDetails.success === false) {
         try {
           logger.error(
-            `unable to retrieve device details --- ${jsonify(
+            `unable to retrieve device details --- ${stringify(
               responseFromGetDeviceDetails.errors
             )}`
           );
@@ -699,7 +833,7 @@ const createEvent = {
           return cacheResult.data;
         }
       } catch (error) {
-        logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
       }
 
       if (page) {
@@ -756,11 +890,11 @@ const createEvent = {
             const errors = resultOfCacheOperation.errors
               ? resultOfCacheOperation.errors
               : { message: "Internal Server Error" };
-            logger.error(`🐛🐛 Internal Server Error -- ${jsonify(errors)}`);
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
             // return resultOfCacheOperation;
           }
         } catch (error) {
-          logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
         }
 
         logText("Cache set.");
@@ -778,7 +912,7 @@ const createEvent = {
         };
       } else {
         logger.error(
-          `Unable to retrieve events --- ${jsonify(
+          `Unable to retrieve events --- ${stringify(
             responseFromListEvents.errors
           )}`
         );
@@ -801,6 +935,138 @@ const createEvent = {
         )
       );
     }
+  },
+  listAveragesV1: async (request, next) => {
+    try {
+      let missingDataMessage = "";
+      const { language, site_id, tenant } = {
+        ...request.query,
+        ...request.params,
+      };
+
+      try {
+        const cacheResult = await Promise.race([
+          createEvent.getCache(request, next),
+          new Promise((resolve) =>
+            setTimeout(resolve, 60000, {
+              success: false,
+              message: "Internal Server Error",
+              status: httpStatus.INTERNAL_SERVER_ERROR,
+              errors: { message: "Cache timeout" },
+            })
+          ),
+        ]);
+
+        logObject("Cache result", cacheResult);
+
+        if (cacheResult.success === true) {
+          logText(cacheResult.message);
+          return cacheResult.data;
+        }
+      } catch (error) {
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
+      }
+
+      const responseFromListEvents = await EventModel(
+        tenant
+      ).getAirQualityAverages(site_id, next);
+
+      if (
+        language !== undefined &&
+        !isEmpty(responseFromListEvents) &&
+        responseFromListEvents.success === true &&
+        !isEmpty(responseFromListEvents.data)
+      ) {
+        const data = responseFromListEvents.data;
+        for (const event of data) {
+          const translatedHealthTips = await translateUtil.translateTips(
+            { healthTips: event.health_tips, targetLanguage: language },
+            next
+          );
+          if (translatedHealthTips.success === true) {
+            event.health_tips = translatedHealthTips.data;
+          }
+        }
+      }
+
+      if (responseFromListEvents.success === true) {
+        const data = !isEmpty(missingDataMessage)
+          ? []
+          : responseFromListEvents.data;
+
+        logText("Setting cache...");
+
+        try {
+          const resultOfCacheOperation = await Promise.race([
+            createEvent.setCache(data, request, next),
+            new Promise((resolve) =>
+              setTimeout(resolve, 60000, {
+                success: false,
+                message: "Internal Server Error",
+                status: httpStatus.INTERNAL_SERVER_ERROR,
+                errors: { message: "Cache timeout" },
+              })
+            ),
+          ]);
+          if (resultOfCacheOperation.success === false) {
+            const errors = resultOfCacheOperation.errors
+              ? resultOfCacheOperation.errors
+              : { message: "Internal Server Error" };
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
+            // return resultOfCacheOperation;
+          }
+        } catch (error) {
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
+        }
+
+        logText("Cache set.");
+
+        return {
+          success: true,
+          message: !isEmpty(missingDataMessage)
+            ? missingDataMessage
+            : isEmpty(data)
+            ? "no measurements for this search"
+            : responseFromListEvents.message,
+          data,
+          status: responseFromListEvents.status || "",
+          isCache: false,
+        };
+      } else {
+        logger.error(
+          `Unable to retrieve events --- ${stringify(
+            responseFromListEvents.errors
+          )}`
+        );
+
+        return {
+          success: false,
+          message: responseFromListEvents.message,
+          errors: responseFromListEvents.errors || { message: "" },
+          status: responseFromListEvents.status || "",
+          isCache: false,
+        };
+      }
+    } catch (error) {
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+    }
+  },
+
+  listAverages: async (request, next) => {
+    const service = new AirQualityService(request.query.tenant);
+    return service.getAirQualityData(request, next);
+  },
+
+  listAveragesV2: async (request, next) => {
+    const service = new AirQualityService(request.query.tenant);
+    return service.getAirQualityData(request, next, "v2");
   },
   view: async (request, next) => {
     try {
@@ -828,7 +1094,7 @@ const createEvent = {
           return cacheResult.data;
         }
       } catch (error) {
-        logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
       }
 
       const viewEventsResponse = await EventModel(tenant).view(filter, next);
@@ -874,11 +1140,11 @@ const createEvent = {
             const errors = resultOfCacheOperation.errors
               ? resultOfCacheOperation.errors
               : { message: "Internal Server Error" };
-            logger.error(`🐛🐛 Internal Server Error -- ${jsonify(errors)}`);
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
             // return resultOfCacheOperation;
           }
         } catch (error) {
-          logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
         }
 
         logText("Cache set.");
@@ -896,7 +1162,9 @@ const createEvent = {
         };
       } else {
         logger.error(
-          `Unable to retrieve events --- ${jsonify(viewEventsResponse.errors)}`
+          `Unable to retrieve events --- ${stringify(
+            viewEventsResponse.errors
+          )}`
         );
 
         return {
@@ -960,7 +1228,7 @@ const createEvent = {
                 } catch (error) {
                   if (error.name === "MongoError" && error.code !== 11000) {
                     logger.error(
-                      `🐛🐛 MongoError -- fetchAndStoreDataIntoReadingsModel -- ${jsonify(
+                      `🐛🐛 MongoError -- fetchAndStoreDataIntoReadingsModel -- ${stringify(
                         error
                       )}`
                     );
@@ -968,7 +1236,7 @@ const createEvent = {
                   } else if (error.code === 11000) {
                     // Ignore duplicate key errors
                     console.warn(
-                      `Duplicate key error for document: ${jsonify(doc)}`
+                      `Duplicate key error for document: ${stringify(doc)}`
                     );
                   }
                 }
@@ -993,7 +1261,7 @@ const createEvent = {
         );
 
         logger.error(
-          `🐛🐛 Unable to retrieve Events to insert into Readings -- ${jsonify(
+          `🐛🐛 Unable to retrieve Events to insert into Readings -- ${stringify(
             viewEventsResponse
           )}`
         );
@@ -1040,7 +1308,7 @@ const createEvent = {
           return cacheResult.data;
         }
       } catch (error) {
-        logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
       }
 
       const readingsResponse = await ReadingModel(tenant).latest(
@@ -1090,11 +1358,11 @@ const createEvent = {
             const errors = resultOfCacheOperation.errors
               ? resultOfCacheOperation.errors
               : { message: "Internal Server Error" };
-            logger.error(`🐛🐛 Internal Server Error -- ${jsonify(errors)}`);
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
             // return resultOfCacheOperation;
           }
         } catch (error) {
-          logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
         }
 
         logText("Cache set.");
@@ -1112,7 +1380,7 @@ const createEvent = {
         };
       } else {
         logger.error(
-          `Unable to retrieve events --- ${jsonify(readingsResponse.errors)}`
+          `Unable to retrieve events --- ${stringify(readingsResponse.errors)}`
         );
 
         return {
@@ -1161,7 +1429,7 @@ const createEvent = {
           return cacheResult.data;
         }
       } catch (error) {
-        logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
       }
 
       const readingsResponse = await ReadingModel(tenant).recent(
@@ -1208,11 +1476,11 @@ const createEvent = {
             const errors = resultOfCacheOperation.errors
               ? resultOfCacheOperation.errors
               : { message: "Internal Server Error" };
-            logger.error(`🐛🐛 Internal Server Error -- ${jsonify(errors)}`);
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
             // return resultOfCacheOperation;
           }
         } catch (error) {
-          logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
         }
 
         logText("Cache set.");
@@ -1230,7 +1498,7 @@ const createEvent = {
         };
       } else {
         logger.error(
-          `Unable to retrieve events --- ${jsonify(readingsResponse.errors)}`
+          `Unable to retrieve events --- ${stringify(readingsResponse.errors)}`
         );
 
         return {
@@ -1241,6 +1509,216 @@ const createEvent = {
           isCache: false,
         };
       }
+    } catch (error) {
+      logObject("error", error);
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+      return;
+    }
+  },
+  listReadingAverages: async (request, next) => {
+    try {
+      let missingDataMessage = "";
+      const { tenant, language, site_id } = {
+        ...request.query,
+        ...request.params,
+      };
+      try {
+        const cacheResult = await Promise.race([
+          createEvent.getCache(request, next),
+          new Promise((resolve) =>
+            setTimeout(resolve, 60000, {
+              success: false,
+              message: "Internal Server Error",
+              status: httpStatus.INTERNAL_SERVER_ERROR,
+              errors: { message: "Cache timeout" },
+            })
+          ),
+        ]);
+
+        if (cacheResult.success === true) {
+          logText(cacheResult.message);
+          return cacheResult.data;
+        }
+      } catch (error) {
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
+      }
+
+      const readingsResponse = await ReadingModel(
+        tenant
+      ).getAirQualityAnalytics(site_id, next);
+
+      if (
+        language !== undefined &&
+        !isEmpty(readingsResponse) &&
+        readingsResponse.success === true &&
+        !isEmpty(readingsResponse.data)
+      ) {
+        const data = readingsResponse.data;
+        for (const event of data) {
+          const translatedHealthTips = await translateUtil.translateTips(
+            { healthTips: event.health_tips, targetLanguage: language },
+            next
+          );
+          if (translatedHealthTips.success === true) {
+            event.health_tips = translatedHealthTips.data;
+          }
+        }
+      }
+
+      if (readingsResponse.success === true) {
+        const data = readingsResponse.data;
+
+        logText("Setting cache...");
+
+        try {
+          const resultOfCacheOperation = await Promise.race([
+            createEvent.setCache(readingsResponse, request, next),
+            new Promise((resolve) =>
+              setTimeout(resolve, 60000, {
+                success: false,
+                message: "Internal Server Error",
+                status: httpStatus.INTERNAL_SERVER_ERROR,
+                errors: { message: "Cache timeout" },
+              })
+            ),
+          ]);
+          if (resultOfCacheOperation.success === false) {
+            const errors = resultOfCacheOperation.errors
+              ? resultOfCacheOperation.errors
+              : { message: "Internal Server Error" };
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
+            // return resultOfCacheOperation;
+          }
+        } catch (error) {
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
+        }
+
+        logText("Cache set.");
+
+        return {
+          success: true,
+          message: !isEmpty(missingDataMessage)
+            ? missingDataMessage
+            : isEmpty(data)
+            ? "no measurements for this search"
+            : readingsResponse.message,
+          data,
+          status: readingsResponse.status || "",
+          isCache: false,
+        };
+      } else {
+        logger.error(
+          `Unable to retrieve events --- ${stringify(readingsResponse.errors)}`
+        );
+
+        return {
+          success: false,
+          message: readingsResponse.message,
+          errors: readingsResponse.errors || { message: "" },
+          status: readingsResponse.status || "",
+          isCache: false,
+        };
+      }
+    } catch (error) {
+      logObject("error", error);
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+      return;
+    }
+  },
+  getBestAirQuality: async (request, next) => {
+    try {
+      const {
+        query: { tenant, threshold, pollutant, language, limit, skip },
+      } = request;
+
+      try {
+        const cacheResult = await Promise.race([
+          createEvent.getCache(request, next),
+          new Promise((resolve) =>
+            setTimeout(resolve, 60000, {
+              success: false,
+              message: "Internal Server Error",
+              status: httpStatus.INTERNAL_SERVER_ERROR,
+              errors: { message: "Cache timeout" },
+            })
+          ),
+        ]);
+
+        if (cacheResult.success === true) {
+          logText(cacheResult.message);
+          return cacheResult.data;
+        }
+      } catch (error) {
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
+      }
+
+      const readingsResponse = await ReadingModel(
+        tenant
+      ).getBestAirQualityLocations({ threshold, pollutant, limit, skip }, next);
+
+      // Handle language translation for health tips if applicable
+      if (
+        language !== undefined &&
+        readingsResponse.success === true &&
+        !isEmpty(readingsResponse.data)
+      ) {
+        const data = readingsResponse.data;
+        for (const event of data) {
+          const translatedHealthTips = await translateUtil.translateTips(
+            { healthTips: event.health_tips, targetLanguage: language },
+            next
+          );
+          if (translatedHealthTips.success === true) {
+            event.health_tips = translatedHealthTips.data;
+          }
+        }
+      }
+
+      try {
+        const resultOfCacheOperation = await Promise.race([
+          createEvent.setCache(readingsResponse, request, next),
+          new Promise((resolve) =>
+            setTimeout(resolve, 60000, {
+              success: false,
+              message: "Internal Server Error",
+              status: httpStatus.INTERNAL_SERVER_ERROR,
+              errors: { message: "Cache timeout" },
+            })
+          ),
+        ]);
+        if (resultOfCacheOperation.success === false) {
+          const errors = resultOfCacheOperation.errors || {
+            message: "Internal Server Error",
+          };
+          logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
+        }
+      } catch (error) {
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
+      }
+
+      return {
+        success: true,
+        message:
+          readingsResponse.message ||
+          "Successfully retrieved air quality data.",
+        data: readingsResponse.data,
+        status: readingsResponse.status || "",
+        isCache: false,
+      };
     } catch (error) {
       logObject("error", error);
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
@@ -1278,7 +1756,7 @@ const createEvent = {
           return cacheResult.data;
         }
       } catch (error) {
-        logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+        logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
       }
 
       const readingsResponse = await SignalModel(tenant).latest(
@@ -1328,11 +1806,11 @@ const createEvent = {
             const errors = resultOfCacheOperation.errors
               ? resultOfCacheOperation.errors
               : { message: "Internal Server Error" };
-            logger.error(`🐛🐛 Internal Server Error -- ${jsonify(errors)}`);
+            logger.error(`🐛🐛 Internal Server Error -- ${stringify(errors)}`);
             // return resultOfCacheOperation;
           }
         } catch (error) {
-          logger.error(`🐛🐛 Internal Server Errors -- ${jsonify(error)}`);
+          logger.error(`🐛🐛 Internal Server Errors -- ${stringify(error)}`);
         }
 
         logText("Cache set.");
@@ -1350,7 +1828,7 @@ const createEvent = {
         };
       } else {
         logger.error(
-          `Unable to retrieve events --- ${jsonify(readingsResponse.errors)}`
+          `Unable to retrieve events --- ${stringify(readingsResponse.errors)}`
         );
 
         return {
@@ -1731,7 +2209,7 @@ const createEvent = {
         .catch(function(error) {
           try {
             logger.error(
-              `internal server error -- ${jsonify(
+              `internal server error -- ${stringify(
                 error.response.data.error.details
               )}`
             );
@@ -1849,7 +2327,7 @@ const createEvent = {
         .catch(function(error) {
           try {
             logger.error(
-              `internal server error -- ${jsonify(error.response.data.error)}`
+              `internal server error -- ${stringify(error.response.data.error)}`
             );
           } catch (error) {
             logger.error(`internal server error -- ${error.message}`);
@@ -1906,30 +2384,45 @@ const createEvent = {
         longitude,
         network,
         language,
+        averages,
+        threshold,
+        pollutant,
+        quality_checks,
       } = { ...request.query, ...request.params };
       const currentTime = new Date().toISOString();
       const day = generateDateFormatWithoutHrs(currentTime);
-      return `list_events_${device ? device : "noDevice"}_${tenant}_${
-        skip ? skip : 0
-      }_${limit ? limit : 0}_${recent ? recent : "noRecent"}_${
-        frequency ? frequency : "noFrequency"
-      }_${endTime ? endTime : "noEndTime"}_${
-        startTime ? startTime : "noStartTime"
-      }_${device_id ? device_id : "noDeviceId"}_${site ? site : "noSite"}_${
-        site_id ? site_id : "noSiteId"
-      }_${day ? day : "noDay"}_${
-        device_number ? device_number : "noDeviceNumber"
-      }_${metadata ? metadata : "noMetadata"}_${
-        external ? external : "noExternal"
-      }_${airqloud ? airqloud : "noAirQloud"}_${
-        airqloud_id ? airqloud_id : "noAirQloudID"
-      }_${lat_long ? lat_long : "noLatLong"}_${page ? page : "noPage"}_${
-        running ? running : "noRunning"
-      }_${index ? index : "noIndex"}_${brief ? brief : "noBrief"}_${
-        latitude ? latitude : "noLatitude"
-      }_${longitude ? longitude : "noLongitude"}_${
-        network ? network : "noNetwork"
-      }_${language ? language : "noLanguage"}`;
+      return `list_events
+      _${device ? device : "noDevice"}
+      _${tenant}
+      _${skip ? skip : 0}
+      _${limit ? limit : 0}
+      _${recent ? recent : "noRecent"}
+      _${frequency ? frequency : "noFrequency"}
+      _${endTime ? endTime : "noEndTime"}
+      _${startTime ? startTime : "noStartTime"}
+      _${device_id ? device_id : "noDeviceId"}
+      _${site ? site : "noSite"}
+      _${site_id ? site_id : "noSiteId"}
+      _${day ? day : "noDay"}
+      _${device_number ? device_number : "noDeviceNumber"}
+      _${metadata ? metadata : "noMetadata"}
+      _${external ? external : "noExternal"}
+      _${airqloud ? airqloud : "noAirQloud"}
+      _${airqloud_id ? airqloud_id : "noAirQloudID"}
+      _${lat_long ? lat_long : "noLatLong"}
+      _${page ? page : "noPage"}
+      _${running ? running : "noRunning"}
+      _${index ? index : "noIndex"}
+      _${brief ? brief : "noBrief"}
+      _${latitude ? latitude : "noLatitude"}
+      _${longitude ? longitude : "noLongitude"}
+      _${network ? network : "noNetwork"}
+      _${language ? language : "noLanguage"}
+      _${averages ? averages : "noAverages"}
+      _${threshold ? threshold : "noThreshold"}
+      _${pollutant ? pollutant : "noPollutant"}
+      _${quality_checks ? quality_checks : "noQualityChecks"}
+      `;
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
       next(
@@ -1946,7 +2439,7 @@ const createEvent = {
       const cacheID = createEvent.generateCacheID(request, next);
       await redisSetAsync(
         cacheID,
-        jsonify({
+        stringify({
           isCache: true,
           success: true,
           message: "Successfully retrieved the measurements",
@@ -1977,7 +2470,6 @@ const createEvent = {
   getCache: async (request, next) => {
     try {
       const cacheID = createEvent.generateCacheID(request, next);
-
       const result = await redisGetAsync(cacheID); // Use the promise-based version
 
       const resultJSON = JSON.parse(result);
@@ -2119,7 +2611,7 @@ const createEvent = {
           logger.error(
             `responseFromGetDeviceDetails was not a success -- ${
               responseFromGetDeviceDetails.message
-            } -- ${jsonify(errors)}`
+            } -- ${stringify(errors)}`
           );
         } catch (error) {
           logger.error(`internal server error -- ${error.message}`);
@@ -2165,7 +2657,7 @@ const createEvent = {
             : { message: "" };
           try {
             logger.error(
-              `transformEventsResponse is not a success -- unable to transform -- ${jsonify(
+              `transformEventsResponse is not a success -- unable to transform -- ${stringify(
                 errors
               )}`
             );
@@ -2324,7 +2816,7 @@ const createEvent = {
 
       if (errors.length > 0 && isEmpty(data)) {
         logger.error(
-          `finished the operation with some errors -- ${jsonify(errors)}`
+          `finished the operation with some errors -- ${stringify(errors)}`
         );
         return {
           success: false,
@@ -2418,7 +2910,7 @@ const createEvent = {
         logger.error(
           `internal server error -- unable to transform measurements -- ${
             responseFromTransformMeasurements.message
-          }, ${jsonify(measurements)}`
+          }, ${stringify(measurements)}`
         );
       }
 
@@ -2529,7 +3021,9 @@ const createEvent = {
       }
 
       if (errors.length > 0 && isEmpty(eventsAdded)) {
-        console.log("API: failed to store measurements");
+        logTextWithTimestamp(
+          "API: failed to store measurements, most likely DB cast errors or duplicate records"
+        );
         return {
           success: false,
           message: "finished the operation with some errors",
@@ -2537,7 +3031,7 @@ const createEvent = {
           status: httpStatus.INTERNAL_SERVER_ERROR,
         };
       } else {
-        console.log("API: successfully added the events");
+        logTextWithTimestamp("API: successfully added the events");
         return {
           success: true,
           message: "successfully added the events",
@@ -2546,6 +3040,7 @@ const createEvent = {
         };
       }
     } catch (error) {
+      logTextWithTimestamp(`API: Internal Server Error ${error.message}`);
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
       next(
         new HttpError(

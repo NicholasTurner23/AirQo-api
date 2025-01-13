@@ -113,8 +113,8 @@ const airqloudSchema = new Schema(
       type: String,
       trim: true,
     },
-    group: {
-      type: String,
+    groups: {
+      type: [String],
       trim: true,
     },
     airqloud_tags: {
@@ -152,7 +152,7 @@ airqloudSchema.methods.toJSON = function() {
     name: this.name,
     long_name: this.long_name,
     network: this.network,
-    group: this.group,
+    groups: this.groups,
     description: this.description,
     airqloud_tags: this.airqloud_tags,
     admin_level: this.admin_level,
@@ -224,12 +224,13 @@ airqloudSchema.statics.list = async function(
   try {
     const inclusionProjection = constants.AIRQLOUDS_INCLUSION_PROJECTION;
     const exclusionProjection = constants.AIRQLOUDS_EXCLUSION_PROJECTION(
-      filter.category ? filter.category : "none"
+      filter.path ? filter.path : "none"
     );
 
-    if (!isEmpty(filter.category)) {
-      delete filter.category;
+    if (!isEmpty(filter.path)) {
+      delete filter.path;
     }
+
     if (!isEmpty(filter.dashboard)) {
       delete filter.dashboard;
     }
@@ -375,11 +376,13 @@ airqloudSchema.statics.remove = async function({ filter = {} } = {}, next) {
 };
 
 const airqloudsModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     const airqlouds = mongoose.model("airqlouds");
     return airqlouds;
   } catch (error) {
-    return getModelByTenant(tenant.toLowerCase(), "airqloud", airqloudSchema);
+    return getModelByTenant(dbTenant.toLowerCase(), "airqloud", airqloudSchema);
   }
 };
 

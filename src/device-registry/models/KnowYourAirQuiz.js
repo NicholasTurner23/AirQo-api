@@ -105,11 +105,13 @@ knowYourAirQuizSchema.statics = {
     try {
       const inclusionProjection = constants.KYA_QUIZ_INCLUSION_PROJECTION;
       const exclusionProjection = constants.KYA_QUIZ_EXCLUSION_PROJECTION(
-        filter.category ? filter.category : "none"
+        filter.path ? filter.path : "none"
       );
-      if (!isEmpty(filter.category)) {
-        delete filter.category;
+
+      if (!isEmpty(filter.path)) {
+        delete filter.path;
       }
+
       if (!isEmpty(filter.dashboard)) {
         delete filter.dashboard;
       }
@@ -331,11 +333,17 @@ knowYourAirQuizSchema.statics = {
 };
 
 const KnowYourAirQuizModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     let kyaquizzes = mongoose.model("kyaquizzes");
     return kyaquizzes;
   } catch (error) {
-    let kyaquizzes = getModelByTenant(tenant, "kyaquiz", knowYourAirQuizSchema);
+    let kyaquizzes = getModelByTenant(
+      dbTenant,
+      "kyaquiz",
+      knowYourAirQuizSchema
+    );
     return kyaquizzes;
   }
 };

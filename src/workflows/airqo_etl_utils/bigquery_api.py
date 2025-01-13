@@ -1,5 +1,7 @@
+import logging
 import os
 from datetime import datetime
+from typing import List
 
 import pandas as pd
 from google.cloud import bigquery
@@ -10,10 +12,13 @@ from .constants import JobAction, ColumnDataType, Tenant, QueryType
 from .date import date_to_str
 from .utils import Utils
 
+logger = logging.getLogger(__name__)
+
 
 class BigQueryApi:
     def __init__(self):
         self.client = bigquery.Client()
+        self.schema_mapping = configuration.SCHEMA_FILE_MAPPING
         self.hourly_measurements_table = configuration.BIGQUERY_HOURLY_EVENTS_TABLE
         # TODO: Remove later
         self.hourly_measurements_table_prod = (
@@ -41,6 +46,7 @@ class BigQueryApi:
         self.raw_weather_table = configuration.BIGQUERY_RAW_WEATHER_TABLE
         self.consolidated_data_table = configuration.BIGQUERY_ANALYTICS_TABLE
         self.sites_table = configuration.BIGQUERY_SITES_TABLE
+        self.sites_sites_table = configuration.BIGQUERY_SITES_SITES_TABLE
         self.airqlouds_table = configuration.BIGQUERY_AIRQLOUDS_TABLE
         self.airqlouds_sites_table = configuration.BIGQUERY_AIRQLOUDS_SITES_TABLE
         self.grids_table = configuration.BIGQUERY_GRIDS_TABLE
@@ -49,8 +55,10 @@ class BigQueryApi:
         self.cohorts_devices_table = configuration.BIGQUERY_COHORTS_DEVICES_TABLE
         self.sites_meta_data_table = configuration.BIGQUERY_SITES_META_DATA_TABLE
         self.devices_table = configuration.BIGQUERY_DEVICES_TABLE
+        self.devices_devices_table = configuration.BIGQUERY_DEVICES_DEVICES_TABLE
         self.devices_summary_table = configuration.BIGQUERY_DEVICES_SUMMARY_TABLE
         self.openweathermap_table = configuration.BIGQUERY_OPENWEATHERMAP_TABLE
+        self.satellite_data_table = configuration.BIGQUERY_SATELLITE_DATA_TABLE
         self.package_directory, _ = os.path.split(__file__)
 
     def get_devices_hourly_data(
@@ -112,36 +120,58 @@ class BigQueryApi:
         float_columns=None,
         integer_columns=None,
     ) -> pd.DataFrame:
+        """
+        Validates and formats the data in the given DataFrame based on the schema of a specified table.
+
+        This function performs the following tasks:
+        1. Ensures the DataFrame contains the required columns as defined in the schema of the `table`.
+        2. Formats column data types (e.g., timestamp, float, integer) based on the table schema or provided arguments.
+        3. Removes duplicate rows, keeping the first occurrence.
+
+        Args:
+            self: Class instance, required for accessing schema-related methods.
+            dataframe (pd.DataFrame): The DataFrame to validate and format.
+            table (str): The name of the table whose schema is used for validation.
+            raise_exception (bool, optional): Whether to raise an exception if required columns are missing. Defaults to True.
+            date_time_columns (list, optional): List of columns to be formatted as datetime. If None, inferred from the schema.
+            float_columns (list, optional): List of columns to be formatted as float. If None, inferred from the schema.
+            integer_columns (list, optional): List of columns to be formatted as integer. If None, inferred from the schema.
+
+        Returns:
+            pd.DataFrame: A validated and formatted DataFrame with duplicates removed.
+
+        Raises:
+            Exception: If required columns are missing and `raise_exception` is set to True.
+        """
         valid_cols = self.get_columns(table=table)
         dataframe_cols = dataframe.columns.to_list()
 
         if set(valid_cols).issubset(set(dataframe_cols)):
             dataframe = dataframe[valid_cols]
         else:
-            print(f"Required columns {valid_cols}")
-            print(f"Dataframe columns {dataframe_cols}")
-            print(
-                f"Difference between required and received {list(set(valid_cols) - set(dataframe_cols))}"
-            )
+            missing_cols = list(set(valid_cols) - set(dataframe_cols))
+            logger.warning(f"Required columns {valid_cols}")
+            logger.warning(f"Dataframe columns {dataframe_cols}")
+            logger.warning(f"Missing columns {missing_cols}")
             if raise_exception:
-                raise Exception("Invalid columns")
+                raise Exception(f"Invalid columns {missing_cols}")
 
         date_time_columns = (
             date_time_columns
             if date_time_columns
-            else self.get_columns(table=table, column_type=ColumnDataType.TIMESTAMP)
+            else self.get_columns(table=table, column_type=[ColumnDataType.TIMESTAMP])
         )
 
         float_columns = (
             float_columns
             if float_columns
-            else self.get_columns(table=table, column_type=ColumnDataType.FLOAT)
+            else self.get_columns(table=table, column_type=[ColumnDataType.FLOAT])
         )
 
         integer_columns = (
             integer_columns
             if integer_columns
-            else self.get_columns(table=table, column_type=ColumnDataType.INTEGER)
+            else self.get_columns(table=table, column_type=[ColumnDataType.INTEGER])
         )
 
         from .data_validator import DataValidationUtils
@@ -156,56 +186,23 @@ class BigQueryApi:
         return dataframe.drop_duplicates(keep="first")
 
     def get_columns(
-        self, table: str, column_type: ColumnDataType = ColumnDataType.NONE
-    ) -> list:
-        if (
-            table == self.hourly_measurements_table
-            or table == self.daily_measurements_table
-        ):
-            schema_file = "measurements.json"
-        elif table == self.raw_measurements_table:
-            schema_file = "raw_measurements.json"
-        elif table == self.hourly_weather_table or table == self.raw_weather_table:
-            schema_file = "weather_data.json"
-        elif table == self.latest_measurements_table:
-            schema_file = "latest_measurements.json"
-        elif table == self.consolidated_data_table:
-            schema_file = "data_warehouse.json"
-        elif table == self.airqlouds_table:
-            schema_file = "airqlouds.json"
-        elif table == self.airqlouds_sites_table:
-            schema_file = "airqlouds_sites.json"
-        elif table == self.grids_table:
-            schema_file = "grids.json"
-        elif table == self.cohorts_table:
-            schema_file = "cohorts.json"
-        elif table == self.grids_sites_table:
-            schema_file = "grids_sites.json"
-        elif table == self.cohorts_devices_table:
-            schema_file = "cohorts_devices.json"
-        elif table == self.sites_table:
-            schema_file = "sites.json"
-        elif table == self.sites_meta_data_table:
-            schema_file = "sites_meta_data.json"
+        self,
+        table: str = "all",
+        column_type: List[ColumnDataType] = [ColumnDataType.NONE],
+    ) -> List[str]:
+        """
+        Retrieves a list of columns that match a schema of a given table and or match data type as well. The schemas should match the tables in bigquery.
 
-        elif table == self.sensor_positions_table:
-            schema_file = "sensor_positions.json"
-        elif table == self.devices_table:
-            schema_file = "devices.json"
-        elif (
-            table == self.clean_mobile_raw_measurements_table
-            or table == self.unclean_mobile_raw_measurements_table
-        ):
-            schema_file = "mobile_measurements.json"
-        elif table == self.airqo_mobile_measurements_table:
-            schema_file = "airqo_mobile_measurements.json"
-        elif table == self.bam_measurements_table:
-            schema_file = "bam_measurements.json"
-        elif table == self.raw_bam_measurements_table:
-            schema_file = "bam_raw_measurements.json"
-        elif table == "all":
-            schema_file = None
-        else:
+        Args:
+            table (str): The data asset name as it appears in BigQuery, in the format 'project.dataset.table'.
+            column_type (List[ColumnDataType]): A list of predetermined ColumnDataType Enums to filter by. Defaults to [ColumnDataType.NONE].
+
+        Returns:
+            List[str]: A list of column names that match the passed specifications.
+        """
+        schema_file = self.schema_mapping.get(table, None)
+
+        if schema_file is None and table != "all":
             raise Exception("Invalid table")
 
         if schema_file:
@@ -229,21 +226,22 @@ class BigQueryApi:
                 file_schema = Utils.load_schema(file_name=f"{file}.json")
                 schema.extend(file_schema)
 
-            # with os.scandir(os.path.join("path", "schema")) as iterator:
-            #     for entry in iterator:
-            #         if entry.name.endswith(".json") and entry.is_file():
-            #
-            #             file_schema = Utils.load_schema(file_path=entry.path)
-            #             schema.extend(file_schema)
+        # Convert column_type list to strings for comparison
+        column_type_strings = [str(ct) for ct in column_type]
 
-        columns = []
-        if column_type != ColumnDataType.NONE:
-            for column in schema:
-                if column["type"] == str(column_type):
-                    columns.append(column["name"])
-        else:
-            columns = [column["name"] for column in schema]
-        return list(set(columns))
+        # Retrieve columns that match any of the specified types or match ColumnDataType.NONE
+        columns: List[str] = list(
+            set(
+                [
+                    column["name"]
+                    for column in schema
+                    if ColumnDataType.NONE in column_type
+                    or column["type"] in column_type_strings
+                ]
+            )
+        )
+
+        return columns
 
     def load_data(
         self,
@@ -271,7 +269,7 @@ class BigQueryApi:
     def add_unique_id(dataframe: pd.DataFrame, id_column="unique_id") -> pd.DataFrame:
         dataframe[id_column] = dataframe.apply(
             lambda row: BigQueryApi.device_unique_col(
-                tenant=row["tenant"],
+                network=row["network"],
                 device_number=row["device_number"],
                 device_id=row["device_id"],
             ),
@@ -280,8 +278,8 @@ class BigQueryApi:
         return dataframe
 
     @staticmethod
-    def device_unique_col(tenant: str, device_id: str, device_number: int):
-        return str(f"{tenant}:{device_id}:{device_number}").lower()
+    def device_unique_col(network: str, device_id: str, device_number: int):
+        return str(f"{network}:{device_id}:{device_number}").lower()
 
     def update_airqlouds(self, dataframe: pd.DataFrame, table=None) -> None:
         if table is None:
@@ -535,20 +533,42 @@ class BigQueryApi:
         table: str,
         start_date_time: str,
         end_date_time: str,
-        tenant: Tenant,
+        network: str = "all",
         where_fields: dict = None,
         null_cols: list = None,
         columns: list = None,
     ) -> str:
+        """
+        Composes a SQL query for BigQuery based on the query type (GET or DELETE),
+        and optionally includes a dynamic selection and aggregation of numeric columns.
+
+        Args:
+            query_type (QueryType): The type of query (GET or DELETE).
+            table (str): The BigQuery table to query.
+            start_date_time (str): The start datetime for filtering records.
+            end_date_time (str): The end datetime for filtering records.
+            network (str): The network or ownership information (e.g., to filter data).
+            where_fields (dict): Optional dictionary of fields to filter on.
+            null_cols (list): Optional list of columns to check for null values.
+            columns (list): Optional list of columns to select. If None, selects all.
+            exclude_columns (list): List of columns to exclude from aggregation if dynamically selecting numeric columns.
+
+        Returns:
+            str: The composed SQL query as a string.
+
+        Raises:
+            Exception: If an invalid column is provided in `where_fields` or `null_cols`,
+                      or if the `query_type` is not supported.
+        """
+
         null_cols = [] if null_cols is None else null_cols
         where_fields = {} if where_fields is None else where_fields
 
         columns = ", ".join(map(str, columns)) if columns else " * "
-        where_clause = (
-            f" timestamp >= '{start_date_time}' and timestamp <= '{end_date_time}' "
-        )
-        if tenant != Tenant.ALL:
-            where_clause = f" {where_clause} and tenant = '{str(tenant)}' "
+        where_clause = f" timestamp between '{start_date_time}' and '{end_date_time}' "
+
+        if network and network != "all":
+            where_clause += f"AND network = '{network}' "
 
         valid_cols = self.get_columns(table=table)
 
@@ -578,21 +598,50 @@ class BigQueryApi:
             """
         else:
             raise Exception(f"Invalid Query Type {str(query_type)}")
-
         return query
 
     def reload_data(
         self,
         dataframe: pd.DataFrame,
         table: str,
-        tenant: Tenant = Tenant.ALL,
+        network: str = "all",
         start_date_time: str = None,
         end_date_time: str = None,
         where_fields: dict = None,
         null_cols: list = None,
     ) -> None:
+        """
+        Reloads data into a specified table in BigQuery by:
+        1. Deleting existing records in the table based on the provided date range,
+        network, and optional filtering criteria.
+        2. Inserting new records from the provided DataFrame.
+
+        Args:
+            dataframe (pd.DataFrame): The data to be reloaded into the table.
+            table (str): The target table in BigQuery.
+            network (str, optional): The network filter to be applied. Defaults to "all".
+            start_date_time (str, optional): The start of the date range for deletion.
+                                            If None, inferred from the DataFrame's earliest timestamp.
+            end_date_time (str, optional): The end of the date range for deletion.
+                                        If None, inferred from the DataFrame's latest timestamp.
+            where_fields (dict, optional): Additional fields and values for filtering rows to delete.
+            null_cols (list, optional): Columns to filter on `NULL` values during deletion.
+
+        Returns:
+            None: The function performs operations directly on the BigQuery table.
+
+        Raises:
+            ValueError: If `timestamp` column is missing in the DataFrame.
+        """
+
         if start_date_time is None or end_date_time is None:
-            data = dataframe.copy()
+            if "timestamp" not in dataframe.columns:
+                raise ValueError(
+                    "The DataFrame must contain a 'timestamp' column to derive the date range."
+                )
+            data = (
+                dataframe.copy()
+            )  # Not sure why this dataframe is being copied. # Memory wastage?
             data["timestamp"] = pd.to_datetime(data["timestamp"])
             start_date_time = date_to_str(data["timestamp"].min())
             end_date_time = date_to_str(data["timestamp"].max())
@@ -600,7 +649,7 @@ class BigQueryApi:
         query = self.compose_query(
             QueryType.DELETE,
             table=table,
-            tenant=tenant,
+            network=network,
             start_date_time=start_date_time,
             end_date_time=end_date_time,
             where_fields=where_fields,
@@ -616,30 +665,140 @@ class BigQueryApi:
         start_date_time: str,
         end_date_time: str,
         table: str,
-        tenant: Tenant,
+        network: str = None,
+        dynamic_query: bool = False,
         columns: list = None,
         where_fields: dict = None,
         null_cols: list = None,
+        time_granularity: str = "HOUR",
     ) -> pd.DataFrame:
-        query = self.compose_query(
-            QueryType.GET,
-            table=table,
-            tenant=tenant,
-            start_date_time=start_date_time,
-            end_date_time=end_date_time,
-            where_fields=where_fields,
-            null_cols=null_cols,
-            columns=columns,
-        )
+        """
+        Queries data from a specified BigQuery table based on the provided parameters.
+
+        Args:
+            start_date_time (str): The start datetime for the data query in ISO format.
+            end_date_time (str): The end datetime for the data query in ISO format.
+            table (str): The name of the table from which to retrieve the data.
+            network(str): An Enum representing the site ownership. Defaults to `ALL` if not supplied, representing all networks.
+            dynamic_query (bool): A boolean value to signal bypassing the automatic query composition to a more dynamic averaging approach.
+            columns (list, optional): A list of column names to include in the query. If None, all columns are included. Defaults to None.
+            where_fields (dict, optional): A dictionary of additional WHERE clause filters where the key is the field name and the value is the filter value. Defaults to None.
+            null_cols (list, optional): A list of columns to filter out null values for. Defaults to None.
+
+        Returns:
+            pd.DataFrame: A pandas DataFrame containing the queried data, with duplicates removed and timestamps converted to `datetime` format. If no data is retrieved, an empty DataFrame is returned.
+        """
+        if not dynamic_query:
+            query = self.compose_query(
+                QueryType.GET,
+                table=table,
+                network=network,
+                start_date_time=start_date_time,
+                end_date_time=end_date_time,
+                where_fields=where_fields,
+                null_cols=null_cols,
+                columns=columns,
+            )
+        else:
+            query = self.dynamic_averaging_query(
+                table,
+                start_date_time,
+                end_date_time,
+                network=network,
+                time_granularity=time_granularity,
+            )
 
         dataframe = self.client.query(query=query).result().to_dataframe()
 
         if dataframe.empty:
             return pd.DataFrame()
 
+        dataframe.rename(columns={time_granularity.lower(): "timestamp"}, inplace=True)
         dataframe["timestamp"] = dataframe["timestamp"].apply(pd.to_datetime)
 
         return dataframe.drop_duplicates(keep="first")
+
+    def dynamic_averaging_query(
+        self,
+        table: str,
+        start_date_time: str,
+        end_date_time: str,
+        exclude_columns: list = None,
+        group_by: list = None,
+        network: str = "all",
+        time_granularity: str = "HOUR",
+    ) -> str:
+        """
+        Constructs a dynamic SQL query to select and average numeric columns, allowing exclusions,
+        custom groupings, and ordering by a specified time granularity (hour, day, week, month).
+
+        Args:
+            table (str): The BigQuery table to query.
+            start_date_time (str): The start datetime for filtering records.
+            end_date_time (str): The end datetime for filtering records.
+            exclude_columns (list): List of columns to exclude from selection and aggregation.
+                                    Defaults to excluding `device_number`, `device_id`, `site_id`, `timestamp`.
+            group_by (list): List of columns to group by in the query. Defaults to
+                            `["device_number", "device_id", "site_id", <time_granularity>]`.
+            time_granularity (str): Time truncation granularity for ordering, must be one of `HOUR`,
+                                    `DAY`, `WEEK`, or `MONTH`. Defaults to `HOUR`.
+
+        Returns:
+            str: A dynamic SQL query string that averages numeric columns and groups data based on
+                the provided granularity and group-by fields.
+
+                Example:
+                    query = dynamic_averaging_query(
+                        table="project.dataset.table",
+                        start_date_time="2024-01-01T00:00:00",
+                        end_date_time="2024-01-04T00:00:00",
+                        exclude_columns=["device_number", "device_id", "site_id", "timestamp"],
+                        group_by=["device_number", "site_id"],
+                        time_granularity="HOUR"
+                    )
+        """
+        valid_granularities = ["HOUR", "DAY", "WEEK", "MONTH"]
+        if time_granularity.upper() not in valid_granularities:
+            logger.exception(
+                f"Invalid time granularity: {time_granularity}. Must be one of {valid_granularities}."
+            )
+
+        # Default for exclude_columns and group_by
+        exclude_columns = exclude_columns or [
+            "device_number",
+            "device_id",
+            "site_id",
+            "timestamp",
+        ]
+        group_by = group_by or ["device_number", "device_id", "site_id", "network"]
+
+        numeric_columns = self.get_columns(
+            table, [ColumnDataType.FLOAT, ColumnDataType.INTEGER]
+        )
+
+        # Construct dynamic AVG statements for numeric columns
+        avg_columns = ",\n    ".join(
+            [
+                f"AVG({col}) AS {col}"
+                for col in numeric_columns
+                if col not in exclude_columns
+            ]
+        )
+
+        where_clause: str = (
+            f"timestamp BETWEEN '{start_date_time}' AND '{end_date_time}' "
+        )
+
+        if network:
+            where_clause += f"AND network = '{network}' "
+
+        # Include time granularity in both SELECT and GROUP BY
+        timestamp_trunc = f"TIMESTAMP_TRUNC(timestamp, {time_granularity.upper()}) AS {time_granularity.lower()}"
+        group_by_clause = ", ".join(group_by + [time_granularity.lower()])
+
+        query = f"""SELECT {", ".join(group_by)}, {timestamp_trunc}, {avg_columns} FROM `{table}` WHERE {where_clause} GROUP BY {group_by_clause} ORDER BY {time_granularity.lower()};"""
+
+        return query
 
     def query_devices(self, tenant: Tenant) -> pd.DataFrame:
         if tenant == Tenant.ALL:
@@ -712,7 +871,7 @@ class BigQueryApi:
         return results
 
     #
-    def fetch_data(
+    def fetch_device_data_for_forecast_job(
         self,
         start_date_time: str,
         job_type: str,
@@ -751,6 +910,79 @@ class BigQueryApi:
         except Exception as e:
             print("Error fetching data from bigquery", {e})
 
+    def fetch_device_data_for_satellite_job(
+        self,
+        start_date_time: str,
+        job_type: str,
+    ) -> pd.DataFrame:
+        try:
+            pd.to_datetime(start_date_time)
+        except ValueError as e:
+            raise ValueError(f"Invalid start date time: {start_date_time}") from e
+
+        query = f"""
+SELECT DISTINCT 
+    TIMESTAMP_TRUNC(t1.timestamp, DAY) as timestamp,
+    t2.city,
+    t1.device_id,
+    t2.latitude,
+    t2.longitude,
+    AVG(t1.pm2_5_calibrated_value) as pm2_5
+FROM {self.hourly_measurements_table_prod} as t1 
+INNER JOIN {self.sites_table} as t2 
+    ON t1.site_id = t2.id 
+WHERE 
+    t1.timestamp > '{start_date_time}' 
+    AND t2.city IN ('Kampala', 'Nairobi', 'Kisumu', 'Lagos', 'Accra', 'Bujumbura', 'Yaounde')
+    AND t1.device_id IS NOT NULL
+GROUP BY 
+    timestamp,
+    t1.device_id,
+    t2.city,
+    t2.latitude,
+    t2.longitude
+ORDER BY 
+    t1.device_id,
+    timestamp;
+        """
+
+        job_config = bigquery.QueryJobConfig()
+        job_config.use_query_cache = True
+        try:
+            df = self.client.query(query, job_config).result().to_dataframe()
+            return df
+        except Exception as e:
+            print("Error fetching data from bigquery", {e})
+
+    def fetch_satellite_readings(
+        self,
+        job_type: str,
+        start_date_time: str = " ",
+    ) -> pd.DataFrame:
+        try:
+            pd.to_datetime(start_date_time)
+        except ValueError as e:
+            raise ValueError(f"Invalid start date time: {start_date_time}") from e
+
+        query = f"""
+        SELECT DISTINCT * FROM `{self.satellite_data_table}`
+        """
+
+        if job_type == "train":
+            query += f"""
+            WHERE date(timestamp) >= '{start_date_time}' 
+            """
+
+        query += "ORDER BY timestamp" ""
+
+        job_config = bigquery.QueryJobConfig()
+        job_config.use_query_cache = True
+        try:
+            df = self.client.query(query, job_config).result().to_dataframe()
+            return df
+        except Exception as e:
+            print("Error fetching data from bigquery", {e})
+
     @staticmethod
     def save_data_to_bigquery(data: pd.DataFrame, table: str):
         """saves the dataframes to the bigquery tables"""
@@ -763,4 +995,4 @@ class BigQueryApi:
             if_exists="append",
             credentials=credentials,
         )
-        print("Hourly data saved to bigquery")
+        print(" data saved to bigquery")

@@ -1,5 +1,5 @@
 const transporter = require("@config/mailer");
-const { logObject } = require("@utils/log");
+const { logObject, logText } = require("@utils/log");
 const isEmpty = require("is-empty");
 const SubscriptionModel = require("@models/Subscription");
 const constants = require("@config/constants");
@@ -49,6 +49,75 @@ let attachments = [
   },
 ];
 
+const getSubscribedBccEmails = async () => {
+  let bccEmails = constants.HARDWARE_AND_DS_EMAILS
+    ? constants.HARDWARE_AND_DS_EMAILS.split(",")
+    : [];
+  let subscribedEmails = [];
+
+  const checkPromises = bccEmails.map(async (bccEmail) => {
+    try {
+      const checkResult = await SubscriptionModel(
+        "airqo"
+      ).checkNotificationStatus({ email: bccEmail.trim(), type: "email" });
+      return checkResult.success ? bccEmail.trim() : null;
+    } catch (error) {
+      logger.error(
+        `Error checking notification status for ${bccEmail}: ${error.message}`
+      );
+      return null;
+    }
+  });
+  const successfulEmails = (await Promise.all(checkPromises)).filter(
+    (email) => email !== null
+  );
+  subscribedEmails = successfulEmails;
+  return subscribedEmails.join(",");
+};
+
+const createMailOptions = ({
+  email,
+  firstName,
+  lastName,
+  activityDetails,
+  deviceDetails,
+  bccEmails,
+  activityType,
+} = {}) => {
+  const subject =
+    activityType === "recall"
+      ? "AirQo Analytics: Device Recall Notification"
+      : "AirQo Analytics: Device Deployment Notification";
+
+  return {
+    from: {
+      name: constants.EMAIL_NAME,
+      address: constants.EMAIL,
+    },
+    to: email,
+    subject,
+    html: msgs.field_activity({
+      firstName,
+      lastName,
+      email,
+      activityDetails,
+      deviceDetails,
+      activityType,
+    }),
+    bcc: bccEmails,
+  };
+};
+const handleMailResponse = (data) => {
+  if (isEmpty(data.rejected) && !isEmpty(data.accepted)) {
+    return { success: true, message: "Email successfully sent", data };
+  } else {
+    throw new HttpError(
+      "Internal Server Error",
+      httpStatus.INTERNAL_SERVER_ERROR,
+      { message: "Email not sent", emailResults: data }
+    );
+  }
+};
 const mailer = {
   candidate: async (
     { firstName, lastName, email, tenant = "airqo" } = {},
@@ -213,6 +282,61 @@ const mailer = {
           { message: error.message }
         )
       );
+    }
+  },
+  yearEndEmail: async ({
+    email = "",
+    firstName = "",
+    lastName = "",
+    tenant = "airqo",
+    userStat = {},
+  } = {}) => {
+    try {
+      const checkResult = await SubscriptionModel(
+        tenant
+      ).checkNotificationStatus({ email, type: "email" });
+
+      if (!checkResult.success) {
+        return checkResult;
+      }
+
+      const mailOptions = {
+        to: email,
+        from: {
+          name: constants.EMAIL_NAME,
+          address: constants.EMAIL,
+        },
+        subject: "Your AirQo Analytics 2024 Year in Review 🌍",
+        html: msgs.yearEndSummary(userStat),
+        attachments: attachments,
+      };
+
+      let response = transporter.sendMail(mailOptions);
+      let data = await response;
+
+      if (isEmpty(data.rejected) && !isEmpty(data.accepted)) {
+        return {
+          success: true,
+          message: "Year-end email successfully sent",
+          data,
+          status: httpStatus.OK,
+        };
+      } else {
+        return {
+          success: false,
+          message: "Internal Server Error",
+          status: httpStatus.INTERNAL_SERVER_ERROR,
+          errors: { message: "Email not sent", emailResults: data },
+        };
+      }
+    } catch (error) {
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      return {
+        success: false,
+        message: "Internal Server Error",
+        status: httpStatus.INTERNAL_SERVER_ERROR,
+        errors: { message: error.message },
+      };
     }
   },
   requestToJoinGroupByEmail: async (
@@ -655,6 +779,7 @@ const mailer = {
       }
 
       const subscribedBccEmails = subscribedEmails.join(",");
+      // bcc: subscribedBccEmails,
       const imagePath = path.join(__dirname, "../config/images");
 
       let mailOptions = {};
@@ -672,7 +797,6 @@ const mailer = {
           token,
           category,
         }),
-        bcc: subscribedBccEmails,
         attachments: [
           {
             filename: "airqoLogo.png",
@@ -904,6 +1028,7 @@ const mailer = {
       }
 
       const subscribedBccEmails = subscribedEmails.join(",");
+      //bcc: subscribedBccEmails,
 
       let mailOptions = {};
       mailOptions = {
@@ -914,7 +1039,6 @@ const mailer = {
         to: `${email}`,
         subject: "Welcome to AirQo!",
         html: msgTemplates.afterEmailVerification(firstName, username, email),
-        bcc: subscribedBccEmails,
         attachments: attachments,
       };
 
@@ -1896,6 +2020,8 @@ const mailer = {
       firstName = "",
       lastName = "",
       siteActivityDetails = {},
+      activityDetails = {},
+      deviceDetails = {},
       tenant = "airqo",
     } = {},
     next
@@ -1935,13 +2061,14 @@ const mailer = {
           address: constants.EMAIL,
         },
         to: `${email}`,
-        subject:
-          "AirQo Analytics: Post-Activity Notification for Device Management Actions",
+        subject: "AirQo Analytics: Monitor Deployment/Recall Alert",
         html: `${msgs.site_activity({
           firstName,
           lastName,
           siteActivityDetails,
           email,
+          activityDetails,
+          deviceDetails,
         })}`,
         bcc: subscribedBccEmails,
         attachments: attachments,
@@ -1979,6 +2106,43 @@ const mailer = {
         )
       );
       return;
+    }
+  },
+
+  fieldActivity: async ({
+    email = "",
+    firstName = "",
+    lastName = "",
+    activityDetails = {},
+    deviceDetails = {},
+    activityType = "recall", // New parameter to determine activity type
+  }) => {
+    try {
+      const checkResult = await SubscriptionModel(
+        "airqo"
+      ).checkNotificationStatus({ email, type: "email" });
+      if (!checkResult.success) return checkResult;
+
+      const bccEmails = await getSubscribedBccEmails();
+      const mailOptions = createMailOptions({
+        email,
+        firstName,
+        lastName,
+        activityDetails,
+        deviceDetails,
+        bccEmails,
+        activityType,
+      });
+
+      let response = await transporter.sendMail(mailOptions);
+      return handleMailResponse(response);
+    } catch (error) {
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      throw new HttpError(
+        "Internal Server Error",
+        httpStatus.INTERNAL_SERVER_ERROR,
+        { message: error.message }
+      );
     }
   },
   compromisedToken: async (

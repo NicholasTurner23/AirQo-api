@@ -492,6 +492,59 @@ const manageSite = {
       return;
     }
   },
+  updateManySites: async (req, res, next) => {
+    try {
+      logText("the BULK update operation starts....");
+      const errors = extractErrorsFromRequest(req);
+      if (errors) {
+        next(
+          new HttpError("bad request errors", httpStatus.BAD_REQUEST, errors)
+        );
+        return;
+      }
+
+      const request = req;
+      const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+      request.query.tenant = isEmpty(req.query.tenant)
+        ? defaultTenant
+        : req.query.tenant;
+
+      const result = await createSiteUtil.updateManySites(request, next);
+
+      if (isEmpty(result) || res.headersSent) {
+        return;
+      }
+
+      if (result.success === true) {
+        const status = result.status ? result.status : httpStatus.OK;
+        return res.status(status).json({
+          message: result.message,
+          success: true,
+          bulk_update_notes: result.data,
+          metadata: result.metadata,
+        });
+      } else if (result.success === false) {
+        const status = result.status
+          ? result.status
+          : httpStatus.INTERNAL_SERVER_ERROR;
+        return res.status(status).json({
+          message: result.message,
+          success: false,
+          errors: result.errors ? result.errors : { message: "" },
+        });
+      }
+    } catch (error) {
+      logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+      return;
+    }
+  },
   refresh: async (req, res, next) => {
     try {
       logText("refreshing site details................");
@@ -613,7 +666,7 @@ const manageSite = {
       request.query.tenant = isEmpty(req.query.tenant)
         ? defaultTenant
         : req.query.tenant;
-      request.query.category = "summary";
+      request.query.path = "summary";
 
       const result = await createSiteUtil.list(request, next);
       if (isEmpty(result) || res.headersSent) {
@@ -714,12 +767,11 @@ const manageSite = {
         );
         return;
       }
-      const {
-        latitude,
-        longitude,
-        approximate_distance_in_km,
-        bearing,
-      } = req.body;
+      const { latitude, longitude, approximate_distance_in_km, bearing } = {
+        ...req.body,
+        ...req.query,
+        ...req.params,
+      };
 
       const result = createSiteUtil.createApproximateCoordinates(
         { latitude, longitude, approximate_distance_in_km, bearing },

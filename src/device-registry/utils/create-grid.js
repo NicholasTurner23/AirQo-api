@@ -15,7 +15,7 @@ const log4js = require("log4js");
 const logger = log4js.getLogger(`${constants.ENVIRONMENT} -- create-grid-util`);
 const { Kafka } = require("kafkajs");
 const fs = require("fs");
-const jsonify = require("@utils/jsonify");
+const stringify = require("@utils/stringify");
 const kafka = new Kafka({
   clientId: constants.KAFKA_CLIENT_ID,
   brokers: constants.KAFKA_BOOTSTRAP_SERVERS,
@@ -109,7 +109,7 @@ const createGrid = {
               messages: [
                 {
                   action: "create",
-                  value: jsonify(responseFromRegisterGrid.data),
+                  value: stringify(responseFromRegisterGrid.data),
                 },
               ],
             });
@@ -223,10 +223,14 @@ const createGrid = {
         next
       );
 
-      logObject("responseFromFindSites", responseFromFindSites);
-
       if (responseFromFindSites.success === false) {
         return responseFromFindSites;
+      } else if (isEmpty(responseFromFindSites.data)) {
+        return {
+          success: true,
+          message: `Refresh successful but NO active sites yet for Grid ${grid_id.toString()}`,
+          status: httpStatus.OK,
+        };
       }
 
       const site_ids = responseFromFindSites.data.map(({ _id }) =>
@@ -296,7 +300,7 @@ const createGrid = {
         }
       } catch (error) {
         logger.error(
-          `🐛🐛 Internal Server Error -- grid refresh -- Remove the Grid from INACTIVE Sites -- ${jsonify(
+          `🐛🐛 Internal Server Error -- grid refresh -- Remove the Grid from INACTIVE Sites -- ${stringify(
             error
           )}`
         );
@@ -416,7 +420,7 @@ const createGrid = {
         "site_id"
       );
 
-      logObject("sitesWithDeployedDevices", sitesWithDeployedDevices);
+      // logObject("sitesWithDeployedDevices", sitesWithDeployedDevices);
 
       // Calculate the bounding box of the grid polygon
       const minLongitude = Math.min(
@@ -474,8 +478,11 @@ const createGrid = {
   },
   list: async (request, next) => {
     try {
-      const { tenant, limit, skip } = request.query;
+      const { tenant, limit, path, skip } = request.query;
       const filter = generateFilter.grids(request, next);
+      if (!isEmpty(path)) {
+        filter.path = path;
+      }
       const responseFromListGrid = await GridModel(tenant).list(
         {
           filter,

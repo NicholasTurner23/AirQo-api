@@ -8,7 +8,7 @@ and following up on its deployment. :)
 const mongoose = require("mongoose");
 const { Schema, model } = require("mongoose");
 const uniqueValidator = require("mongoose-unique-validator");
-const { logObject } = require("@utils/log");
+const { logObject, logText } = require("@utils/log");
 const ObjectId = Schema.Types.ObjectId;
 const constants = require("@config/constants");
 const isEmpty = require("is-empty");
@@ -21,6 +21,19 @@ const logger = require("log4js").getLogger(
 const DEFAULT_LIMIT = 1000;
 const DEFAULT_SKIP = 0;
 const DEFAULT_PAGE = 1;
+const UPTIME_CHECK_THRESHOLD = 168;
+const moment = require("moment-timezone");
+const TIMEZONE = moment.tz.guess();
+
+const AQI_RANGES = {
+  good: { min: 0, max: 9.1 },
+  moderate: { min: 9.101, max: 35.49 },
+  u4sg: { min: 35.491, max: 55.49 },
+  unhealthy: { min: 55.491, max: 125.49 },
+  very_unhealthy: { min: 125.491, max: 225.49 },
+  hazardous: { min: 225.491, max: null },
+};
+
 const valueSchema = new Schema({
   time: {
     type: Date,
@@ -206,6 +219,42 @@ const valueSchema = new Schema({
       default: null,
     },
   },
+
+  tvoc: {
+    value: {
+      type: Number,
+      default: null,
+    },
+  },
+
+  co2: {
+    value: {
+      type: Number,
+      default: null,
+    },
+  },
+
+  hcho: {
+    value: {
+      type: Number,
+      default: null,
+    },
+  },
+
+  intaketemperature: {
+    value: {
+      type: Number,
+      default: null,
+    },
+  },
+
+  intakehumidity: {
+    value: {
+      type: Number,
+      default: null,
+    },
+  },
+
   internalTemperature: {
     value: {
       type: Number,
@@ -403,6 +452,8 @@ eventSchema.index(
   }
 );
 
+eventSchema.index({ "values.time": 1, "values.site_id": 1 });
+
 eventSchema.pre("save", function() {
   const err = new Error("something went wrong");
   next(err);
@@ -547,6 +598,13 @@ async function fetchData(model, filter) {
     projection["externalTemperature"] = 0;
     projection["internalTemperature"] = 0;
     projection["hdop"] = 0;
+
+    projection["tvoc"] = 0;
+    projection["hcho"] = 0;
+    projection["co2"] = 0;
+    projection["intaketemperature"] = 0;
+    projection["intakehumidity"] = 0;
+
     projection["satellites"] = 0;
     projection["speed"] = 0;
     projection["altitude"] = 0;
@@ -635,6 +693,11 @@ async function fetchData(model, filter) {
       speed: 0,
       satellites: 0,
       hdop: 0,
+      intaketemperature: 0,
+      tvoc: 0,
+      hcho: 0,
+      co2: 0,
+      intakehumidity: 0,
       internalTemperature: 0,
       externalTemperature: 0,
       internalHumidity: 0,
@@ -755,6 +818,13 @@ async function fetchData(model, filter) {
         speed: { $first: "$speed" },
         satellites: { $first: "$satellites" },
         hdop: { $first: "$hdop" },
+
+        intaketemperature: { $first: "$intaketemperature" },
+        tvoc: { $first: "$tvoc" },
+        hcho: { $first: "$hcho" },
+        co2: { $first: "$co2" },
+        intakehumidity: { $first: "$intakehumidity" },
+
         internalTemperature: { $first: "$internalTemperature" },
         externalTemperature: { $first: "$externalTemperature" },
         internalHumidity: { $first: "$internalHumidity" },
@@ -799,6 +869,9 @@ async function fetchData(model, filter) {
         "site_image.airqloud_id": 0,
       })
       .project(projection)
+      .addFields({
+        aqi_ranges: AQI_RANGES,
+      })
       .facet({
         total: [{ $count: "device" }],
         data: [
@@ -811,8 +884,8 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 0] },
-                          { $lt: ["$pm2_5.value", 12.1] },
+                          { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                          { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                         ],
                       },
                       then: "00e400",
@@ -820,8 +893,12 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 12.1] },
-                          { $lt: ["$pm2_5.value", 35.5] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.moderate.min"],
+                          },
+                          {
+                            $lte: ["$pm2_5.value", "$aqi_ranges.moderate.max"],
+                          },
                         ],
                       },
                       then: "ffff00",
@@ -829,8 +906,8 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 35.5] },
-                          { $lt: ["$pm2_5.value", 55.5] },
+                          { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                          { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                         ],
                       },
                       then: "ff7e00",
@@ -838,8 +915,12 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 55.5] },
-                          { $lt: ["$pm2_5.value", 150.5] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.unhealthy.min"],
+                          },
+                          {
+                            $lte: ["$pm2_5.value", "$aqi_ranges.unhealthy.max"],
+                          },
                         ],
                       },
                       then: "ff0000",
@@ -847,14 +928,26 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 150.5] },
-                          { $lt: ["$pm2_5.value", 250.5] },
+                          {
+                            $gte: [
+                              "$pm2_5.value",
+                              "$aqi_ranges.very_unhealthy.min",
+                            ],
+                          },
+                          {
+                            $lte: [
+                              "$pm2_5.value",
+                              "$aqi_ranges.very_unhealthy.max",
+                            ],
+                          },
                         ],
                       },
                       then: "8f3f97",
                     },
                     {
-                      case: { $gte: ["$pm2_5.value", 250.5] },
+                      case: {
+                        $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"],
+                      },
                       then: "7e0023",
                     },
                   ],
@@ -868,8 +961,8 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 0] },
-                          { $lte: ["$pm2_5.value", 12] },
+                          { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                          { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                         ],
                       },
                       then: "Good",
@@ -877,8 +970,12 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 12] },
-                          { $lte: ["$pm2_5.value", 35.4] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.moderate.min"],
+                          },
+                          {
+                            $lte: ["$pm2_5.value", "$aqi_ranges.moderate.max"],
+                          },
                         ],
                       },
                       then: "Moderate",
@@ -886,8 +983,8 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 35.4] },
-                          { $lte: ["$pm2_5.value", 55.4] },
+                          { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                          { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                         ],
                       },
                       then: "Unhealthy for Sensitive Groups",
@@ -895,8 +992,12 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 55.4] },
-                          { $lte: ["$pm2_5.value", 150.4] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.unhealthy.min"],
+                          },
+                          {
+                            $lte: ["$pm2_5.value", "$aqi_ranges.unhealthy.max"],
+                          },
                         ],
                       },
                       then: "Unhealthy",
@@ -904,8 +1005,18 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 150.4] },
-                          { $lte: ["$pm2_5.value", 250.4] },
+                          {
+                            $gte: [
+                              "$pm2_5.value",
+                              "$aqi_ranges.very_unhealthy.min",
+                            ],
+                          },
+                          {
+                            $lte: [
+                              "$pm2_5.value",
+                              "$aqi_ranges.very_unhealthy.max",
+                            ],
+                          },
                         ],
                       },
                       then: "Very Unhealthy",
@@ -913,8 +1024,9 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 250.4] },
-                          { $lte: ["$pm2_5.value", 500] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"],
+                          },
                         ],
                       },
                       then: "Hazardous",
@@ -929,8 +1041,8 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gte: ["$pm2_5.value", 0] },
-                          { $lte: ["$pm2_5.value", 12] },
+                          { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                          { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                         ],
                       },
                       then: "Green",
@@ -938,8 +1050,12 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 12] },
-                          { $lte: ["$pm2_5.value", 35.4] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.moderate.min"],
+                          },
+                          {
+                            $lte: ["$pm2_5.value", "$aqi_ranges.moderate.max"],
+                          },
                         ],
                       },
                       then: "Yellow",
@@ -947,8 +1063,8 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 35.4] },
-                          { $lte: ["$pm2_5.value", 55.4] },
+                          { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                          { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                         ],
                       },
                       then: "Orange",
@@ -956,8 +1072,12 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 55.4] },
-                          { $lte: ["$pm2_5.value", 150.4] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.unhealthy.min"],
+                          },
+                          {
+                            $lte: ["$pm2_5.value", "$aqi_ranges.unhealthy.max"],
+                          },
                         ],
                       },
                       then: "Red",
@@ -965,8 +1085,18 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 150.4] },
-                          { $lte: ["$pm2_5.value", 250.4] },
+                          {
+                            $gte: [
+                              "$pm2_5.value",
+                              "$aqi_ranges.very_unhealthy.min",
+                            ],
+                          },
+                          {
+                            $lte: [
+                              "$pm2_5.value",
+                              "$aqi_ranges.very_unhealthy.max",
+                            ],
+                          },
                         ],
                       },
                       then: "Purple",
@@ -974,8 +1104,9 @@ async function fetchData(model, filter) {
                     {
                       case: {
                         $and: [
-                          { $gt: ["$pm2_5.value", 250.4] },
-                          { $lte: ["$pm2_5.value", 500] },
+                          {
+                            $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"],
+                          },
                         ],
                       },
                       then: "Maroon",
@@ -984,6 +1115,7 @@ async function fetchData(model, filter) {
                   default: "Unknown",
                 },
               },
+              aqi_ranges: "$aqi_ranges",
             },
           },
         ],
@@ -1045,6 +1177,13 @@ async function fetchData(model, filter) {
         _network: "$network",
         _satellites: "$satellites",
         _hdop: "$hdop",
+
+        _tvoc: "$tvoc",
+        _hcho: "$hcho",
+        _co2: "$co2",
+        _intaketemperature: "$intaketemperature",
+        _intakehumidity: "$intakehumidity",
+
         _site_id: "$site_id",
         _device_id: "$device_id",
         _site: "$site",
@@ -1087,6 +1226,13 @@ async function fetchData(model, filter) {
         network: "$_network",
         satellites: "$_satellites",
         hdop: "$_hdop",
+
+        intaketemperature: "$_intaketemperature",
+        tvoc: "$_tvoc",
+        hcho: "$_hcho",
+        co2: "$_co2",
+        intakehumidity: "$_intakehumidity",
+
         internalTemperature: "$_internalTemperature",
         externalTemperature: "$_externalTemperature",
         internalHumidity: "$_internalHumidity",
@@ -1212,6 +1358,13 @@ async function signalData(model, filter) {
   projection["externalTemperature"] = 0;
   projection["internalTemperature"] = 0;
   projection["hdop"] = 0;
+
+  projection["tvoc"] = 0;
+  projection["hcho"] = 0;
+  projection["co2"] = 0;
+  projection["intaketemperature"] = 0;
+  projection["intakehumidity"] = 0;
+
   projection["satellites"] = 0;
   projection["speed"] = 0;
   projection["altitude"] = 0;
@@ -1343,6 +1496,13 @@ async function signalData(model, filter) {
       speed: { $first: "$speed" },
       satellites: { $first: "$satellites" },
       hdop: { $first: "$hdop" },
+
+      intaketemperature: { $first: "$intaketemperature" },
+      tvoc: { $first: "$tvoc" },
+      hcho: { $first: "$hcho" },
+      co2: { $first: "$co2" },
+      intakehumidity: { $first: "$intakehumidity" },
+
       internalTemperature: { $first: "$internalTemperature" },
       externalTemperature: { $first: "$externalTemperature" },
       internalHumidity: { $first: "$internalHumidity" },
@@ -1387,6 +1547,9 @@ async function signalData(model, filter) {
       "site_image.airqloud_id": 0,
     })
     .project(projection)
+    .addFields({
+      aqi_ranges: AQI_RANGES,
+    })
     .facet({
       total: [{ $count: "device" }],
       data: [
@@ -1399,8 +1562,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 0] },
-                        { $lt: ["$pm2_5.value", 12.1] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                       ],
                     },
                     then: "00e400",
@@ -1408,8 +1571,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 12.1] },
-                        { $lt: ["$pm2_5.value", 35.5] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.moderate.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.moderate.max"] },
                       ],
                     },
                     then: "ffff00",
@@ -1417,8 +1580,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 35.5] },
-                        { $lt: ["$pm2_5.value", 55.5] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                       ],
                     },
                     then: "ff7e00",
@@ -1426,8 +1589,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 55.5] },
-                        { $lt: ["$pm2_5.value", 150.5] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.unhealthy.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.unhealthy.max"] },
                       ],
                     },
                     then: "ff0000",
@@ -1435,14 +1598,26 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 150.5] },
-                        { $lt: ["$pm2_5.value", 250.5] },
+                        {
+                          $gte: [
+                            "$pm2_5.value",
+                            "$aqi_ranges.very_unhealthy.min",
+                          ],
+                        },
+                        {
+                          $lte: [
+                            "$pm2_5.value",
+                            "$aqi_ranges.very_unhealthy.max",
+                          ],
+                        },
                       ],
                     },
                     then: "8f3f97",
                   },
                   {
-                    case: { $gte: ["$pm2_5.value", 250.5] },
+                    case: {
+                      $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"],
+                    },
                     then: "7e0023",
                   },
                 ],
@@ -1456,8 +1631,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 0] },
-                        { $lte: ["$pm2_5.value", 12] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                       ],
                     },
                     then: "Good",
@@ -1465,8 +1640,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 12] },
-                        { $lte: ["$pm2_5.value", 35.4] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.moderate.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.moderate.max"] },
                       ],
                     },
                     then: "Moderate",
@@ -1474,8 +1649,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 35.4] },
-                        { $lte: ["$pm2_5.value", 55.4] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                       ],
                     },
                     then: "Unhealthy for Sensitive Groups",
@@ -1483,8 +1658,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 55.4] },
-                        { $lte: ["$pm2_5.value", 150.4] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.unhealthy.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.unhealthy.max"] },
                       ],
                     },
                     then: "Unhealthy",
@@ -1492,8 +1667,18 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 150.4] },
-                        { $lte: ["$pm2_5.value", 250.4] },
+                        {
+                          $gte: [
+                            "$pm2_5.value",
+                            "$aqi_ranges.very_unhealthy.min",
+                          ],
+                        },
+                        {
+                          $lte: [
+                            "$pm2_5.value",
+                            "$aqi_ranges.very_unhealthy.max",
+                          ],
+                        },
                       ],
                     },
                     then: "Very Unhealthy",
@@ -1501,8 +1686,7 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 250.4] },
-                        { $lte: ["$pm2_5.value", 500] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"] },
                       ],
                     },
                     then: "Hazardous",
@@ -1517,8 +1701,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gte: ["$pm2_5.value", 0] },
-                        { $lte: ["$pm2_5.value", 12] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                       ],
                     },
                     then: "Green",
@@ -1526,8 +1710,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 12] },
-                        { $lte: ["$pm2_5.value", 35.4] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.moderate.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.moderate.max"] },
                       ],
                     },
                     then: "Yellow",
@@ -1535,8 +1719,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 35.4] },
-                        { $lte: ["$pm2_5.value", 55.4] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                       ],
                     },
                     then: "Orange",
@@ -1544,8 +1728,8 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 55.4] },
-                        { $lte: ["$pm2_5.value", 150.4] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.unhealthy.min"] },
+                        { $lte: ["$pm2_5.value", "$aqi_ranges.unhealthy.max"] },
                       ],
                     },
                     then: "Red",
@@ -1553,8 +1737,18 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 150.4] },
-                        { $lte: ["$pm2_5.value", 250.4] },
+                        {
+                          $gte: [
+                            "$pm2_5.value",
+                            "$aqi_ranges.very_unhealthy.min",
+                          ],
+                        },
+                        {
+                          $lte: [
+                            "$pm2_5.value",
+                            "$aqi_ranges.very_unhealthy.max",
+                          ],
+                        },
                       ],
                     },
                     then: "Purple",
@@ -1562,8 +1756,7 @@ async function signalData(model, filter) {
                   {
                     case: {
                       $and: [
-                        { $gt: ["$pm2_5.value", 250.4] },
-                        { $lte: ["$pm2_5.value", 500] },
+                        { $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"] },
                       ],
                     },
                     then: "Maroon",
@@ -1572,6 +1765,7 @@ async function signalData(model, filter) {
                 default: "Unknown",
               },
             },
+            aqi_ranges: "$aqi_ranges",
           },
         },
       ],
@@ -1594,9 +1788,9 @@ async function signalData(model, filter) {
 }
 function filterNullAndReportOffDevices(data) {
   data.forEach((record) => {
-    if (record.timeDifferenceHours > 14) {
+    if (record.timeDifferenceHours > UPTIME_CHECK_THRESHOLD) {
       logObject(
-        `🪫🪫 Last refreshed time difference exceeds 14 hours for device: ${
+        `🪫🪫 Last refreshed time difference exceeds ${UPTIME_CHECK_THRESHOLD} hours for device: ${
           record.device ? record.device : ""
         }, frequency ${record.frequency ? record.frequency : ""}, time ${
           record.time ? record.time : ""
@@ -1604,7 +1798,7 @@ function filterNullAndReportOffDevices(data) {
       );
       if (constants.ENVIRONMENT === "PRODUCTION ENVIRONMENT") {
         logger.info(
-          `🪫🪫 Last refreshed time difference exceeds 14 hours for device: ${
+          `🪫🪫 Last refreshed time difference exceeds ${UPTIME_CHECK_THRESHOLD} hours for device: ${
             record.device ? record.device : ""
           }, Frequency: ${record.frequency ? record.frequency : ""}, Time: ${
             record.time ? record.time : ""
@@ -1764,6 +1958,13 @@ eventSchema.statics.list = async function(
       projection["externalTemperature"] = 0;
       projection["internalTemperature"] = 0;
       projection["hdop"] = 0;
+
+      projection["tvoc"] = 0;
+      projection["hcho"] = 0;
+      projection["co2"] = 0;
+      projection["intaketemperature"] = 0;
+      projection["intakehumidity"] = 0;
+
       projection["satellites"] = 0;
       projection["speed"] = 0;
       projection["altitude"] = 0;
@@ -1852,6 +2053,13 @@ eventSchema.statics.list = async function(
         speed: 0,
         satellites: 0,
         hdop: 0,
+
+        intaketemperature: 0,
+        tvoc: 0,
+        hcho: 0,
+        co2: 0,
+        intakehumidity: 0,
+
         internalTemperature: 0,
         externalTemperature: 0,
         internalHumidity: 0,
@@ -1970,6 +2178,11 @@ eventSchema.statics.list = async function(
           speed: { $first: "$speed" },
           satellites: { $first: "$satellites" },
           hdop: { $first: "$hdop" },
+          intaketemperature: { $first: "$intaketemperature" },
+          tvoc: { $first: "$tvoc" },
+          hcho: { $first: "$hcho" },
+          co2: { $first: "$co2" },
+          intakehumidity: { $first: "$intakehumidity" },
           internalTemperature: { $first: "$internalTemperature" },
           externalTemperature: { $first: "$externalTemperature" },
           internalHumidity: { $first: "$internalHumidity" },
@@ -2014,6 +2227,9 @@ eventSchema.statics.list = async function(
           "site_image.airqloud_id": 0,
         })
         .project(projection)
+        .addFields({
+          aqi_ranges: AQI_RANGES,
+        })
         .facet({
           total: [{ $count: "device" }],
           data: [
@@ -2026,8 +2242,8 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 0] },
-                            { $lt: ["$pm2_5.value", 12.1] },
+                            { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                            { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                           ],
                         },
                         then: "00e400",
@@ -2035,8 +2251,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 12.1] },
-                            { $lt: ["$pm2_5.value", 35.5] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.moderate.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.moderate.max",
+                              ],
+                            },
                           ],
                         },
                         then: "ffff00",
@@ -2044,8 +2270,8 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 35.5] },
-                            { $lt: ["$pm2_5.value", 55.5] },
+                            { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                            { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                           ],
                         },
                         then: "ff7e00",
@@ -2053,8 +2279,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 55.5] },
-                            { $lt: ["$pm2_5.value", 150.5] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.unhealthy.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.unhealthy.max",
+                              ],
+                            },
                           ],
                         },
                         then: "ff0000",
@@ -2062,29 +2298,40 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 150.5] },
-                            { $lt: ["$pm2_5.value", 250.5] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.very_unhealthy.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.very_unhealthy.max",
+                              ],
+                            },
                           ],
                         },
                         then: "8f3f97",
                       },
                       {
-                        case: { $gte: ["$pm2_5.value", 250.5] },
+                        case: {
+                          $gte: ["$pm2_5.value", "$aqi_ranges.hazardous.min"],
+                        },
                         then: "7e0023",
                       },
                     ],
                     default: "Unknown",
                   },
                 },
-
                 aqi_category: {
                   $switch: {
                     branches: [
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 0] },
-                            { $lte: ["$pm2_5.value", 12] },
+                            { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                            { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                           ],
                         },
                         then: "Good",
@@ -2092,8 +2339,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 12] },
-                            { $lte: ["$pm2_5.value", 35.4] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.moderate.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.moderate.max",
+                              ],
+                            },
                           ],
                         },
                         then: "Moderate",
@@ -2101,8 +2358,8 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 35.4] },
-                            { $lte: ["$pm2_5.value", 55.4] },
+                            { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                            { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                           ],
                         },
                         then: "Unhealthy for Sensitive Groups",
@@ -2110,8 +2367,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 55.4] },
-                            { $lte: ["$pm2_5.value", 150.4] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.unhealthy.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.unhealthy.max",
+                              ],
+                            },
                           ],
                         },
                         then: "Unhealthy",
@@ -2119,8 +2386,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 150.4] },
-                            { $lte: ["$pm2_5.value", 250.4] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.very_unhealthy.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.very_unhealthy.max",
+                              ],
+                            },
                           ],
                         },
                         then: "Very Unhealthy",
@@ -2128,8 +2405,12 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 250.4] },
-                            { $lte: ["$pm2_5.value", 500] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.hazardous.min",
+                              ],
+                            },
                           ],
                         },
                         then: "Hazardous",
@@ -2144,8 +2425,8 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gte: ["$pm2_5.value", 0] },
-                            { $lte: ["$pm2_5.value", 12] },
+                            { $gte: ["$pm2_5.value", "$aqi_ranges.good.min"] },
+                            { $lte: ["$pm2_5.value", "$aqi_ranges.good.max"] },
                           ],
                         },
                         then: "Green",
@@ -2153,8 +2434,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 12] },
-                            { $lte: ["$pm2_5.value", 35.4] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.moderate.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.moderate.max",
+                              ],
+                            },
                           ],
                         },
                         then: "Yellow",
@@ -2162,8 +2453,8 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 35.4] },
-                            { $lte: ["$pm2_5.value", 55.4] },
+                            { $gte: ["$pm2_5.value", "$aqi_ranges.u4sg.min"] },
+                            { $lte: ["$pm2_5.value", "$aqi_ranges.u4sg.max"] },
                           ],
                         },
                         then: "Orange",
@@ -2171,8 +2462,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 55.4] },
-                            { $lte: ["$pm2_5.value", 150.4] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.unhealthy.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.unhealthy.max",
+                              ],
+                            },
                           ],
                         },
                         then: "Red",
@@ -2180,8 +2481,18 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 150.4] },
-                            { $lte: ["$pm2_5.value", 250.4] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.very_unhealthy.min",
+                              ],
+                            },
+                            {
+                              $lte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.very_unhealthy.max",
+                              ],
+                            },
                           ],
                         },
                         then: "Purple",
@@ -2189,8 +2500,12 @@ eventSchema.statics.list = async function(
                       {
                         case: {
                           $and: [
-                            { $gt: ["$pm2_5.value", 250.4] },
-                            { $lte: ["$pm2_5.value", 500] },
+                            {
+                              $gte: [
+                                "$pm2_5.value",
+                                "$aqi_ranges.hazardous.min",
+                              ],
+                            },
                           ],
                         },
                         then: "Maroon",
@@ -2199,6 +2514,7 @@ eventSchema.statics.list = async function(
                     default: "Unknown",
                   },
                 },
+                aqi_ranges: "$aqi_ranges",
               },
             },
           ],
@@ -2266,6 +2582,13 @@ eventSchema.statics.list = async function(
           _network: "$network",
           _satellites: "$satellites",
           _hdop: "$hdop",
+
+          _tvoc: "$tvoc",
+          _hcho: "$hcho",
+          _co2: "$co2",
+          _intaketemperature: "$intaketemperature",
+          _intakehumidity: "$intakehumidity",
+
           _site_id: "$site_id",
           _device_id: "$device_id",
           _site: "$site",
@@ -2308,6 +2631,11 @@ eventSchema.statics.list = async function(
           network: "$_network",
           satellites: "$_satellites",
           hdop: "$_hdop",
+          intaketemperature: "$_intaketemperature",
+          tvoc: "$_tvoc",
+          hcho: "$_hcho",
+          co2: "$_co2",
+          intakehumidity: "$_intakehumidity",
           internalTemperature: "$_internalTemperature",
           externalTemperature: "$_externalTemperature",
           internalHumidity: "$_internalHumidity",
@@ -2443,12 +2771,476 @@ eventSchema.statics.signal = async function(filter) {
   }
 };
 
+eventSchema.statics.getAirQualityAverages = async function(siteId, next) {
+  try {
+    const testDate = "2022-12-20T11:43:18.595Z";
+    const now = moment()
+      .tz(TIMEZONE)
+      .toDate(); // Convert back to Date object
+    const today = moment()
+      .tz(TIMEZONE)
+      .startOf("day")
+      .toDate();
+    const twoWeeksAgo = moment()
+      .tz(TIMEZONE)
+      .startOf("day")
+      .subtract(14, "days")
+      .toDate();
+
+    logText("Debug Info:");
+    logObject("TIMEZONE", TIMEZONE);
+    logObject("now", now);
+    logObject("today", today);
+    logObject("twoWeeksAgo", twoWeeksAgo);
+
+    const result = await this.aggregate([
+      // Initial match to reduce documents early
+      {
+        $match: {
+          "values.site_id": mongoose.Types.ObjectId(siteId),
+          "values.time": { $gte: twoWeeksAgo, $lte: now },
+        },
+      },
+
+      // Unwind with preservation to handle empty arrays
+      {
+        $unwind: {
+          path: "$values",
+          preserveNullAndEmptyArrays: false,
+        },
+      },
+
+      // Secondary match to filter unwound documents
+      {
+        $match: {
+          "values.time": { $gte: twoWeeksAgo, $lte: now },
+          "values.pm2_5.value": { $exists: true, $ne: null },
+        },
+      },
+
+      // Optimized projection
+      {
+        $project: {
+          _id: 0,
+          time: "$values.time",
+          pm2_5: "$values.pm2_5.value",
+          yearWeek: {
+            $let: {
+              vars: {
+                dateParts: {
+                  $dateToParts: {
+                    date: "$values.time",
+                    timezone: TIMEZONE,
+                    iso8601: true,
+                  },
+                },
+              },
+              in: {
+                $concat: [
+                  { $toString: "$$dateParts.isoWeekYear" },
+                  "-",
+                  {
+                    $cond: [
+                      { $lt: ["$$dateParts.isoWeek", 10] },
+                      {
+                        $concat: ["0", { $toString: "$$dateParts.isoWeek" }],
+                      },
+                      { $toString: "$$dateParts.isoWeek" },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          dayOfYear: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$values.time",
+              timezone: TIMEZONE,
+            },
+          },
+        },
+      },
+
+      // First group by day
+      {
+        $group: {
+          _id: "$dayOfYear",
+          dailyAverage: { $avg: "$pm2_5" },
+          yearWeek: { $first: "$yearWeek" },
+        },
+      },
+
+      // Then group by week
+      {
+        $group: {
+          _id: "$yearWeek",
+          weeklyAverage: { $avg: "$dailyAverage" },
+          days: {
+            $push: {
+              date: "$_id",
+              average: "$dailyAverage",
+            },
+          },
+        },
+      },
+
+      // Sort and limit
+      { $sort: { _id: -1 } },
+      { $limit: 2 },
+    ]).allowDiskUse(true);
+
+    if (result.length < 2) {
+      return {
+        success: false,
+        message: "Insufficient data for comparison",
+        status: httpStatus.NOT_FOUND,
+      };
+    }
+
+    const [currentWeek, previousWeek] = result;
+    logObject("Current Week days", currentWeek.days);
+    const todayStr = moment(today)
+      .tz(TIMEZONE)
+      .format("YYYY-MM-DD");
+
+    logObject("todayStr", todayStr);
+    const todayAverage = currentWeek.days.find((day) => day.date === todayStr)
+      ?.average;
+
+    logObject("Found todayAverage", todayAverage);
+    logObject(
+      "Matching day",
+      currentWeek.days.find((day) => day.date === todayStr)
+    );
+
+    const percentageDifference =
+      previousWeek.weeklyAverage !== 0
+        ? ((currentWeek.weeklyAverage - previousWeek.weeklyAverage) /
+            previousWeek.weeklyAverage) *
+          100
+        : 0;
+
+    return {
+      success: true,
+      data: {
+        dailyAverage: todayAverage ? parseFloat(todayAverage.toFixed(2)) : null,
+        percentageDifference: parseFloat(percentageDifference.toFixed(2)),
+        weeklyAverages: {
+          currentWeek: parseFloat(currentWeek.weeklyAverage.toFixed(2)),
+          previousWeek: parseFloat(previousWeek.weeklyAverage.toFixed(2)),
+        },
+      },
+      message: "Successfully retrieved air quality averages",
+      status: httpStatus.OK,
+    };
+  } catch (error) {
+    logger.error(
+      `Internal Server Error --- getAirQualityAverages --- ${error.message}`
+    );
+    logObject("error", error);
+    next(
+      new HttpError("Internal Server Error", httpStatus.INTERNAL_SERVER_ERROR, {
+        message: error.message,
+      })
+    );
+  }
+};
+
+eventSchema.statics.v2_getAirQualityAverages = async function(siteId, next) {
+  try {
+    const TIMEZONE = "Africa/Kampala";
+    const MIN_READINGS_PER_DAY = 12; // Minimum readings per day for validity
+
+    const now = moment()
+      .tz(TIMEZONE)
+      .toDate();
+    const today = moment()
+      .tz(TIMEZONE)
+      .startOf("day")
+      .toDate();
+    const twoWeeksAgo = moment()
+      .tz(TIMEZONE)
+      .startOf("day")
+      .subtract(14, "days")
+      .toDate();
+
+    logText("Debug Info:");
+    logObject("TIMEZONE", TIMEZONE);
+    logObject("now", now);
+    logObject("today", today);
+    logObject("twoWeeksAgo", twoWeeksAgo);
+
+    const result = await this.aggregate([
+      // Initial match
+      {
+        $match: {
+          "values.site_id": mongoose.Types.ObjectId(siteId),
+          "values.time": { $gte: twoWeeksAgo, $lte: now },
+        },
+      },
+
+      // Unwind values
+      {
+        $unwind: {
+          path: "$values",
+          preserveNullAndEmptyArrays: false,
+        },
+      },
+
+      // Data quality filtering
+      {
+        $match: {
+          "values.time": { $gte: twoWeeksAgo, $lte: now },
+          "values.pm2_5.value": {
+            $exists: true,
+            $ne: null,
+            $gte: 0,
+            $lte: 1000,
+          },
+        },
+      },
+
+      // Project fields
+      {
+        $project: {
+          _id: 0,
+          time: "$values.time",
+          pm2_5: "$values.pm2_5.value",
+          yearWeek: {
+            $let: {
+              vars: {
+                dateParts: {
+                  $dateToParts: {
+                    date: "$values.time",
+                    timezone: TIMEZONE,
+                    iso8601: true,
+                  },
+                },
+              },
+              in: {
+                $concat: [
+                  { $toString: "$$dateParts.isoWeekYear" },
+                  "-",
+                  {
+                    $cond: [
+                      { $lt: ["$$dateParts.isoWeek", 10] },
+                      { $concat: ["0", { $toString: "$$dateParts.isoWeek" }] },
+                      { $toString: "$$dateParts.isoWeek" },
+                    ],
+                  },
+                ],
+              },
+            },
+          },
+          dayOfYear: {
+            $dateToString: {
+              format: "%Y-%m-%d",
+              date: "$values.time",
+              timezone: TIMEZONE,
+            },
+          },
+          hourOfDay: {
+            $hour: {
+              date: "$values.time",
+              timezone: TIMEZONE,
+            },
+          },
+        },
+      },
+
+      // Group by day with data quality metrics
+      {
+        $group: {
+          _id: "$dayOfYear",
+          dailyAverage: { $avg: "$pm2_5" },
+          readingCount: { $sum: 1 },
+          uniqueHours: { $addToSet: "$hourOfDay" },
+          yearWeek: { $first: "$yearWeek" },
+          minReading: { $min: "$pm2_5" },
+          maxReading: { $max: "$pm2_5" },
+        },
+      },
+
+      // Add data quality indicators
+      {
+        $addFields: {
+          dataQuality: {
+            hasMinReadings: { $gte: ["$readingCount", MIN_READINGS_PER_DAY] },
+            hoursCovered: { $size: "$uniqueHours" },
+            readingSpread: { $subtract: ["$maxReading", "$minReading"] },
+          },
+        },
+      },
+
+      // Group by week with quality metrics
+      {
+        $group: {
+          _id: "$yearWeek",
+          weeklyAverage: { $avg: "$dailyAverage" },
+          daysWithData: { $sum: 1 },
+          daysWithMinReadings: {
+            $sum: { $cond: ["$dataQuality.hasMinReadings", 1, 0] },
+          },
+          avgHoursCovered: { $avg: "$dataQuality.hoursCovered" },
+          days: {
+            $push: {
+              date: "$_id",
+              average: "$dailyAverage",
+              readingCount: "$readingCount",
+              hoursCovered: "$dataQuality.hoursCovered",
+              readingSpread: "$dataQuality.readingSpread",
+            },
+          },
+        },
+      },
+
+      // Sort and limit to 2 weeks
+      { $sort: { _id: -1 } },
+      { $limit: 2 },
+    ]).allowDiskUse(true);
+
+    if (result.length < 2) {
+      return {
+        success: false,
+        message: "Insufficient data for comparison",
+        status: httpStatus.NOT_FOUND,
+      };
+    }
+
+    const [currentWeek, previousWeek] = result;
+    const todayStr = moment(today)
+      .tz(TIMEZONE)
+      .format("YYYY-MM-DD");
+    const todayData = currentWeek.days.find((day) => day.date === todayStr);
+
+    // Calculate percentage difference without capping
+    const percentageDifference =
+      previousWeek.weeklyAverage !== 0
+        ? ((currentWeek.weeklyAverage - previousWeek.weeklyAverage) /
+            previousWeek.weeklyAverage) *
+          100
+        : 0;
+
+    // Calculate data quality score
+    const dataQualityScore = calculateWeeklyDataQuality(
+      currentWeek,
+      previousWeek
+    );
+
+    return {
+      success: true,
+      data: {
+        dailyAverage: todayData
+          ? {
+              value: parseFloat(todayData.average.toFixed(2)),
+              readingCount: todayData.readingCount,
+              hoursCovered: todayData.hoursCovered,
+            }
+          : null,
+        percentageDifference: parseFloat(percentageDifference.toFixed(2)),
+        weeklyAverages: {
+          currentWeek: parseFloat(currentWeek.weeklyAverage.toFixed(2)),
+          previousWeek: parseFloat(previousWeek.weeklyAverage.toFixed(2)),
+        },
+        dataQuality: {
+          score: dataQualityScore,
+          currentWeek: {
+            daysWithData: currentWeek.daysWithData,
+            daysWithMinReadings: currentWeek.daysWithMinReadings,
+            averageHoursCovered: parseFloat(
+              currentWeek.avgHoursCovered.toFixed(1)
+            ),
+          },
+          previousWeek: {
+            daysWithData: previousWeek.daysWithData,
+            daysWithMinReadings: previousWeek.daysWithMinReadings,
+            averageHoursCovered: parseFloat(
+              previousWeek.avgHoursCovered.toFixed(1)
+            ),
+          },
+          warning:
+            dataQualityScore < 0.7
+              ? "Low data quality may affect accuracy of comparison"
+              : null,
+        },
+      },
+      message: "Successfully retrieved air quality averages",
+      status: httpStatus.OK,
+    };
+  } catch (error) {
+    logger.error(
+      `Internal Server Error --- getAirQualityAverages --- ${error.message}`
+    );
+    logObject("error", error);
+    next(
+      new HttpError("Internal Server Error", httpStatus.INTERNAL_SERVER_ERROR, {
+        message: error.message,
+      })
+    );
+  }
+};
+
+function calculateWeeklyDataQuality(currentWeek, previousWeek) {
+  const IDEAL_DAYS = 7;
+  const IDEAL_HOURS = 24;
+
+  // Calculate scores for each week
+  const currentScore =
+    (currentWeek.daysWithMinReadings / IDEAL_DAYS) *
+    (currentWeek.avgHoursCovered / IDEAL_HOURS);
+
+  const previousScore =
+    (previousWeek.daysWithMinReadings / IDEAL_DAYS) *
+    (previousWeek.avgHoursCovered / IDEAL_HOURS);
+
+  // Return average score (0-1 range)
+  return (currentScore + previousScore) / 2;
+}
+
+// Helper function to calculate confidence score
+function calculateConfidenceScore(
+  currentWeek,
+  baselineWeeks,
+  minDataPointsPerDay
+) {
+  const maxPossibleReadings = 24; // Assuming hourly readings
+  const idealDaysPerWeek = 7;
+
+  // Score current week data completeness
+  const currentWeekScore =
+    (currentWeek.daysWithData / idealDaysPerWeek) *
+    (currentWeek.days.reduce(
+      (acc, day) => acc + day.readingCount / maxPossibleReadings,
+      0
+    ) /
+      currentWeek.daysWithData);
+
+  // Score baseline weeks data completeness
+  const baselineScore =
+    baselineWeeks.reduce((acc, week) => {
+      const weekScore =
+        (week.daysWithData / idealDaysPerWeek) *
+        (week.days.reduce(
+          (acc, day) => acc + day.readingCount / maxPossibleReadings,
+          0
+        ) /
+          week.daysWithData);
+      return acc + weekScore;
+    }, 0) / baselineWeeks.length;
+
+  // Combine scores (giving more weight to current week)
+  return (currentWeekScore * 0.6 + baselineScore * 0.4) * 100;
+}
+
 const eventsModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     const events = mongoose.model("events");
     return events;
   } catch (error) {
-    return getModelByTenant(tenant.toLowerCase(), "event", eventSchema);
+    return getModelByTenant(dbTenant.toLowerCase(), "event", eventSchema);
   }
 };
 

@@ -24,7 +24,6 @@ class WeatherDataUtils:
             start_date_time=start_date_time,
             end_date_time=end_date_time,
             table=bigquery_api.hourly_weather_table,
-            tenant=Tenant.ALL,
         )
         cols = bigquery_api.get_columns(table=bigquery_api.hourly_weather_table)
         return pd.DataFrame([], cols) if measurements.empty else measurements
@@ -79,7 +78,6 @@ class WeatherDataUtils:
             start_date_time=start_date_time,
             end_date_time=end_date_time,
             table=bigquery_api.raw_weather_table,
-            tenant=Tenant.ALL,
         )
 
         return measurements
@@ -134,6 +132,7 @@ class WeatherDataUtils:
 
         data["value"] = pd.to_numeric(data["value"], errors="coerce", downcast="float")
         data["time"] = pd.to_datetime(data["time"], errors="coerce")
+        # TODO Clean this up.
         parameter_mappings = {
             "te": "temperature",
             "rh": "humidity",
@@ -170,7 +169,7 @@ class WeatherDataUtils:
 
         cols = [value for value in parameter_mappings.values()]
 
-        weather_data = Utils.populate_missing_columns(data=weather_data, cols=cols)
+        weather_data = Utils.populate_missing_columns(data=weather_data, columns=cols)
 
         return DataValidationUtils.remove_outliers(weather_data)
 
@@ -246,7 +245,7 @@ class WeatherDataUtils:
         bigquery = BigQueryApi()
         cols = bigquery.get_columns(table=bigquery.hourly_weather_table)
 
-        return Utils.populate_missing_columns(data=data, cols=cols)
+        return Utils.populate_missing_columns(data=data, columns=cols)
 
     @staticmethod
     def extract_latitude_and_longitude(data: pd.DataFrame) -> list[tuple]:

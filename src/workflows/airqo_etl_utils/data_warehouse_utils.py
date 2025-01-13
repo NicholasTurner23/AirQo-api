@@ -33,7 +33,6 @@ class DataWarehouseUtils:
             start_date_time=start_date_time,
             end_date_time=end_date_time,
             table=biq_query_api.bam_measurements_table,
-            tenant=Tenant.ALL,
         )
 
         if data.empty:
@@ -46,7 +45,7 @@ class DataWarehouseUtils:
             },
             inplace=True,
         )
-        data.loc[:, "device_category"] = str(DeviceCategory.BAM)
+        data["device_category"] = str(DeviceCategory.BAM)
         return DataWarehouseUtils.filter_valid_columns(data)
 
     @staticmethod
@@ -59,14 +58,13 @@ class DataWarehouseUtils:
             start_date_time=start_date_time,
             end_date_time=end_date_time,
             table=biq_query_api.consolidated_data_table,
-            tenant=Tenant.ALL,
         )
 
     @staticmethod
     def remove_duplicates(data: pd.DataFrame) -> pd.DataFrame:
         data["timestamp"] = pd.to_datetime(data["timestamp"])
         return data.drop_duplicates(
-            subset=["tenant", "timestamp", "device_number", "device_id"],
+            subset=["network", "timestamp", "device_number", "device_id"],
             keep="first",
         )
 
@@ -83,7 +81,6 @@ class DataWarehouseUtils:
             start_date_time=start_date_time,
             end_date_time=end_date_time,
             table=biq_query_api.hourly_measurements_table,
-            tenant=Tenant.ALL,
         )
 
         if data.empty:
@@ -97,7 +94,7 @@ class DataWarehouseUtils:
             },
             inplace=True,
         )
-        data.loc[:, "device_category"] = str(DeviceCategory.LOW_COST)
+        data["device_category"] = str(DeviceCategory.LOW_COST)
         return DataWarehouseUtils.filter_valid_columns(data)
 
     @staticmethod
@@ -109,14 +106,14 @@ class DataWarehouseUtils:
         )
 
     @staticmethod
-    def extract_sites_meta_data(tenant: Tenant = Tenant.ALL) -> pd.DataFrame:
+    def extract_sites_meta_data(network: str = "all") -> pd.DataFrame:
         airqo_api = AirQoApi()
-        sites = airqo_api.get_sites(tenant=tenant)
+        sites = airqo_api.get_sites(network=network)
         sites = pd.DataFrame(sites)
         sites.rename(
             columns={
-                "latitude": "site_latitude",
-                "longitude": "site_longitude",
+                "approximate_latitude": "site_latitude",
+                "approximate_longitude": "site_longitude",
                 "description": "site_description",
                 "altitude": "site_altitude",
                 "name": "site_name",
@@ -147,9 +144,11 @@ class DataWarehouseUtils:
         low_cost_data.loc[:, "device_category"] = str(DeviceCategory.LOW_COST)
         bam_data.loc[:, "device_category"] = str(DeviceCategory.BAM)
 
-        airqo_data = low_cost_data.loc[low_cost_data["tenant"] == str(Tenant.AIRQO)]
+        airqo_data = low_cost_data.loc[low_cost_data["network"] == str(Tenant.AIRQO)]
 
-        non_airqo_data = low_cost_data.loc[low_cost_data["tenant"] != str(Tenant.AIRQO)]
+        non_airqo_data = low_cost_data.loc[
+            low_cost_data["network"] != str(Tenant.AIRQO)
+        ]
         airqo_data = AirQoDataUtils.merge_aggregated_weather_data(
             airqo_data=airqo_data, weather_data=weather_data
         )
@@ -161,6 +160,6 @@ class DataWarehouseUtils:
         return pd.merge(
             left=devices_data,
             right=sites_info,
-            on=["site_id", "tenant"],
+            on=["site_id", "network"],
             how="left",
         )

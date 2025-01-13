@@ -18,10 +18,15 @@ const passport = require("passport");
 const { HttpError } = require("@utils/errors");
 const isDev = process.env.NODE_ENV === "development";
 const isProd = process.env.NODE_ENV === "production";
+const rateLimit = require("express-rate-limit");
 const options = { mongooseConnection: mongoose.connection };
-require("@bin/active-status-job");
-require("@bin/token-expiration-job");
-require("@bin/incomplete-profile-job");
+require("@bin/jobs/active-status-job");
+require("@bin/jobs/token-expiration-job");
+require("@bin/jobs/incomplete-profile-job");
+require("@bin/jobs/preferences-log-job");
+require("@bin/jobs/preferences-update-job");
+// require("@bin/jobs/update-user-activities-job");
+require("@bin/jobs/profile-picture-update-job");
 const log4js = require("log4js");
 const debug = require("debug")("auth-service:server");
 const isEmpty = require("is-empty");
@@ -45,6 +50,7 @@ app.use(
     saveUninitialized: false,
   })
 ); // session setup
+
 app.use(fileUpload());
 app.use(bodyParser.json({ limit: "50mb" })); // JSON body parser
 // Other common middlewares: morgan, cookieParser, passport, etc.
@@ -73,6 +79,13 @@ app.use(
 // Static file serving
 app.use(express.static(path.join(__dirname, "public")));
 
+const transactionLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 100, // Limit each IP to 100 requests per window
+  message: "Too many transaction requests, please try again later",
+});
+app.use("/api/v2/users/transactions", transactionLimiter);
+
 // app.use("/api/v1/users", require("@routes/v1"));
 app.use("/api/v2/users", require("@routes/v2"));
 
@@ -91,6 +104,12 @@ app.use(function (err, req, res, next) {
         message: err.message,
         errors: err.errors,
       });
+    } else if (err instanceof SyntaxError) {
+      res.status(400).json({
+        success: false,
+        message: "Invalid JSON",
+        errors: { message: "Invalid JSON" },
+      });
     } else if (err.status === 404) {
       res.status(err.status).json({
         success: false,
@@ -98,28 +117,28 @@ app.use(function (err, req, res, next) {
         errors: { message: err.message },
       });
     } else if (err.status === 400) {
-      logger.error(`Bad request error --- ${JSON.stringify(err)}`);
+      logger.error(`Bad request error --- ${stringify(err)}`);
       res.status(err.status).json({
         success: false,
         message: "Bad request error",
         errors: { message: err.message },
       });
     } else if (err.status === 401) {
-      logger.error(`Unauthorized --- ${JSON.stringify(err)}`);
+      logger.error(`Unauthorized --- ${stringify(err)}`);
       res.status(err.status).json({
         success: false,
         message: "Unauthorized",
         errors: { message: err.message },
       });
     } else if (err.status === 403) {
-      logger.error(`Forbidden --- ${JSON.stringify(err)}`);
+      logger.error(`Forbidden --- ${stringify(err)}`);
       res.status(err.status).json({
         success: false,
         message: "Forbidden",
         errors: { message: err.message },
       });
     } else if (err.status === 500) {
-      // logger.error(`🐛🐛 Internal Server Error --- ${JSON.stringify(err)}`);
+      // logger.error(`🐛🐛 Internal Server Error --- ${stringify(err)}`);
       // logger.error(`Stack Trace: ${err.stack}`);
       logObject("the error", err);
       res.status(err.status).json({
@@ -128,19 +147,19 @@ app.use(function (err, req, res, next) {
         errors: { message: err.message },
       });
     } else if (err.status === 502 || err.status === 503 || err.status === 504) {
-      logger.error(`${err.message} --- ${JSON.stringify(err)}`);
+      logger.error(`${err.message} --- ${stringify(err)}`);
       res.status(err.status).json({
         success: false,
         message: err.message,
         errors: { message: err.message },
       });
     } else {
-      logger.error(`🐛🐛 Internal Server Error --- ${JSON.stringify(err)}`);
+      logger.error(`🐛🐛 Internal Server Error --- ${stringify(err)}`);
       logObject("Internal Server Error", err);
       logger.error(`Stack Trace: ${err.stack}`);
-      res.status(err.status || 500).json({
+      res.status(err.status || err.statusCode || 500).json({
         success: false,
-        message: "Internal Server Error - app entry",
+        message: "Internal Server Error",
         errors: { message: err.message },
       });
     }

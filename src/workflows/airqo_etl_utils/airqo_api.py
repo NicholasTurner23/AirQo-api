@@ -5,11 +5,14 @@ import pandas as pd
 import simplejson
 import urllib3
 from urllib3.util.retry import Retry
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Union, Generator, Tuple, Optional
 
 from .config import configuration
 from .constants import DeviceCategory, Tenant
 from .utils import Utils
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class AirQoApi:
@@ -23,21 +26,22 @@ class AirQoApi:
 
     def save_events(self, measurements: List) -> None:
         #  Temporarily disabling usage of the API to store measurements.
-        if "staging" in self.AIRQO_BASE_URL_V2.lower():
-            return
-
+        # if "staging" in self.AIRQO_BASE_URL_V2.lower():
+        #     return
+        # TODO Findout if there is a bulk post api option greater than 5.
         for i in range(0, len(measurements), int(configuration.POST_EVENTS_BODY_SIZE)):
             data = measurements[i : i + int(configuration.POST_EVENTS_BODY_SIZE)]
-            response = self.__request(
-                endpoint="devices/events",
-                params={"tenant": str(Tenant.AIRQO)},
-                method="post",
-                body=data,
-            )
-            print(response)
+            if data:
+                network = data[0].get("network", "")
+                self.__request(
+                    endpoint="devices/events",
+                    params={"network": network},
+                    method="post",
+                    body=data,
+                )
 
     def get_maintenance_logs(
-        self, tenant: str, device: str, activity_type: str = None
+        self, network: str, device: str, activity_type: str = None
     ) -> List:
         """
         Retrieve devices given a tenant and device category.
@@ -66,7 +70,7 @@ class AirQoApi:
             ]
         """
         # Why is tenant still a parameter when it is being overriden.
-        params = {"tenant": str(Tenant.AIRQO), "device": device}
+        params = {"network": network, "device": device}
 
         if activity_type:
             params["activity_type"] = activity_type
@@ -124,20 +128,19 @@ class AirQoApi:
             )
             return response if response else []
         except Exception as ex:
-            traceback.print_exc()
-            print(ex)
+            logger.exception()
             return []
 
     def get_devices(
         self,
-        tenant: Tenant = Tenant.ALL,
-        device_category: DeviceCategory = DeviceCategory.NONE,
+        network: Union[str, Any] = None,
+        device_category: DeviceCategory = None,
     ) -> List[Dict[str, Any]]:
         """
-        Retrieve devices given a tenant and device category.
+        Retrieve devices given a network and device category.
 
         Args:
-            - tenant (Tenant, optional): An Enum that represents site ownership. Defaults to `Tenant.ALL` if not supplied.
+            - network (str): A string that represents device manufaturer.
             - device_category (DeviceCategory, optional): An Enum that represents device category. Defaults to `DeviceCategory.None` if not supplied.
 
         Returns:
@@ -171,87 +174,206 @@ class AirQoApi:
                     "previous_sites": List[Dict[str, Any]],
                     "cohorts": List,
                     "site": Dict[str, Any],
-                    device_number
+                    "device_number": int
                 },
             ]
         """
-        params = {"tenant": str(Tenant.AIRQO), "active": "yes"}
-        if tenant != Tenant.ALL:
-            params["network"] = str(tenant)
+        params: Dict = {}
+        if device_category:
+            params["category"] = str(device_category)
 
-        response = self.__request("devices", params)
+        if configuration.ENVIRONMENT == "production":
+            params["active"] = "yes"
+
+        if network:
+            params["network"] = network
+
+        # Note: There is an option of using <api/v2/devices> if more device details are required as shown in the doc string return payload.
+        try:
+            response = self.__request("devices/summary", params)
+        except Exception as e:
+            logger.exception(f"Failed to fetch devices: {e}")
+            return []
+
         devices = [
             {
-                **device,
-                "device_number": device.get("device_number"),
-                "latitude": device.get("latitude")
-                or device.get("approximate_latitude"),
-                "longitude": device.get("longitude")
-                or device.get("approximate_longitude"),
-                "device_id": device.get("name"),
-                "device_codes": [str(code) for code in device.get("device_codes", [])],
-                "mongo_id": device.get("_id"),
-                "site_id": device.get("site", {}).get("_id"),
-                "site_location": device.get("site", {}).get("location_name"),
+                "device_id": device.pop("name"),
+                "site_id": device.get("site", {}).get("_id", None),
+                "site_location": device.pop("site", {}).get("location_name", None),
                 "device_category": str(
-                    DeviceCategory.from_str(device.get("category", ""))
+                    DeviceCategory.category_from_str(device.pop("category", ""))
                 ),
-                "tenant": device.get("network"),
-                "device_manufacturer": device.get("device_manufacturer")
-                or Tenant.from_str(device.get("network")).device_manufacturer(),
+                "device_manufacturer": device.get("network", "airqo"),
+                **device,
             }
             for device in response.get("devices", [])
         ]
-
-        if device_category != DeviceCategory.NONE:
-            devices = [
-                device
-                for device in devices
-                if device["device_category"] == str(device_category)
-            ]
         return devices
 
-    def get_thingspeak_read_keys(self, devices: List[Dict]) -> Dict[int, str]:
+    def get_networks(
+        self, net_status: str = "active"
+    ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
         """
-        Retrieve read keys from thingspeak given a list of devices.
+        Retrieve a list of networks.
 
         Args:
-            - tenant (Tenant, optional): An Enum that represents site ownership. Defaults to `Tenant.ALL` if not supplied.
-            - device_category (DeviceCategory, optional): An Enum that represents device category. Defaults to `DeviceCategory.None` if not supplied.
+            net_status (str): The status of networks to retrieve. Defaults to "active".
 
         Returns:
-            Dict[int, str]: A dictionary containing device decrypted keys. The dictionary has the following structure.
-            {
-                "device_number": int,
-                "decrypted_key": str
-            }
+            Tuple[List[Dict[str, Any]], Optional[str]]:
+                - List of networks (dictionaries) retrieved from the API.
+                - Optional error message if an exception occurs.
+        """
+        params = {}
+        networks: List[Dict[str, Any]] = []
+        exception_message: Optional[str] = None
+
+        if configuration.ENVIRONMENT == "production":
+            params["net_status"] = net_status
+
+        try:
+            response = self.__request("users/networks", params)
+            networks = response.get("networks", [])
+        except Exception as e:
+            exception_message = f"Failed to fetch networks: {e}"
+            logger.exception(exception_message)
+
+        return networks, exception_message
+
+    def get_devices_by_network(
+        self, device_network: str = None, device_category: DeviceCategory = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve devices by network based on the specified device category.
+
+        Args:
+            network (str): This defines the network or manufacture of the device(s) to retrieve. Defaults to `None`. If not passed, devices from all networks are returned.
+            device_category (DeviceCategory, optional): The category of devices to retrieve. Defaults to `None`. If not passed, devices from all categories are returned.
+
+        Returns:
+            List[Dict[str, Any]]: A List of dictionaries containing the details of the devices. The dictionary has the following structure.
+            [
+                {
+                    "_id": str,
+                    "visibility": bool,
+                    "mobility": bool,
+                    "height": int,
+                    "device_codes": List[str]
+                    "status": str,
+                    "isPrimaryInLocation": bool,
+                    "nextMaintenance": date(str),
+                    "category": str,
+                    "isActive": bool,
+                    "long_name": str,
+                    "network": str,
+                    "alias": str",
+                    "name": str,
+                    "createdAt": date(str),
+                    "description": str,
+                    "latitude": float,
+                    "longitude": float,
+                    "approximate_distance_in_km": float,
+                    "bearing_in_radians": float,
+                    "deployment_date": date(str),
+                    "mountType": str,
+                    "powerType": str,
+                    "recall_date": date(str),
+                    "previous_sites": List[Dict[str, Any]],
+                    "cohorts": List,
+                    "site": Dict[str, Any],
+                    "device_number": int
+                },
+            ]
+        """
+        devices: List[Dict[str, Any]] = []
+        networks: List[str] = []
+        params: Dict = {}
+        if device_network:
+            networks.append({"net_name": device_network})
+        else:
+            networks, error = self.get_networks()
+            if error:
+                logger.error(f"Error while fetching networks: {error}")
+                return devices
+
+        if device_category:
+            params["category"] = str(device_category)
+
+        if configuration.ENVIRONMENT == "production":
+            params["active"] = True
+
+        for network in networks:
+            network_name = network.get("net_name", "airqo")
+            params["network"] = network_name
+            try:
+                response = self.__request("devices/summary", params)
+                devices.extend(
+                    [
+                        {
+                            "site_id": device.get("site", {}).get("_id", None),
+                            "site_location": device.pop("site", {}).get(
+                                "location_name", None
+                            ),
+                            "device_category": device.pop("category", None),
+                            "device_manufacturer": network_name,
+                            **device,
+                        }
+                        for device in response.get("devices", [])
+                    ]
+                )
+            except Exception as e:
+                logger.exception(f"Failed to fetch devices on {network_name}: {e}")
+                continue
+
+        return devices
+
+    def get_thingspeak_read_keys(
+        self, devices: pd.DataFrame, return_type: str = "all"
+    ) -> Union[Dict[int, str], Generator[Tuple[int, str], None, None]]:
+        """
+        Retrieve read keys from the AirQo API given a list of devices.
+
+        Args:
+            devices (pd.DataFrame): A pandas DataFrame of devices read keys and device numbers.
+            return_type (str): Defines the return behavior. If 'all', returns a dictionary of all keys.
+                            If 'yield', yields each key one by one as a generator. Defaults to 'all'.
+
+        Returns:
+            Union[Dict[int, str], Generator[Tuple[int, str], None, None]]:
+                - A dictionary containing device decrypted keys when `return_type='all'`. The dictionary has the structure {device_number: decrypted_key}.
+                - A generator yielding (device_number, decrypted_key) when `return_type='yield'`.
         """
 
         body: List = []
         decrypted_keys: List[Dict[str, str]] = []
         decrypted_read_keys: Dict[int, str] = {}
 
-        for device in devices:
-            read_key = device.get("readKey", None)
-            device_number = device.get("device_number", None)
-            if read_key and device_number:
+        for device_number, row in devices.iterrows():
+            if pd.notna(row["readKey"]) and pd.notna(device_number):
                 body.append(
-                    {
-                        "encrypted_key": read_key,
-                        "device_number": device_number,
-                    }
+                    {"encrypted_key": row["readKey"], "device_number": device_number}
                 )
 
         response = self.__request("devices/decrypt/bulk", body=body, method="post")
 
         if response:
             decrypted_keys = response.get("decrypted_keys", [])
-            return {
-                int(entry["device_number"]): entry["decrypted_key"]
-                for entry in decrypted_keys
-            }
-         # TODO Find a better way to do better handling vs returning an empty object.
-        return decrypted_read_keys
+
+            if return_type == "all":
+                return {
+                    int(entry["device_number"]): entry["decrypted_key"]
+                    for entry in decrypted_keys
+                }
+            elif return_type == "yield":
+                for entry in decrypted_keys:
+                    device_number = int(entry["device_number"])
+                    decrypted_key = entry["decrypted_key"]
+                    yield device_number, decrypted_key
+
+        if return_type == "all":
+            return decrypted_read_keys
+        elif return_type == "yield":
+            return
 
     def get_forecast(self, frequency: str, site_id: str) -> List:
         """
@@ -374,7 +496,7 @@ class AirQoApi:
 
                 meta_data[key] = float(response["data"])
             except Exception as ex:
-                print(ex)
+                logger.exception()
 
         return meta_data
 
@@ -383,13 +505,11 @@ class AirQoApi:
         query_params = {"tenant": str(Tenant.AIRQO), "id": airqloud_id}
 
         try:
-            response = self.__request(
-                endpoint="devices/airqlouds/refresh",
-                params=query_params,
-                method="put",
+            self.__request(
+                endpoint="devices/airqlouds/refresh", params=query_params, method="put"
             )
-        except Exception as ex:
-            print(ex)
+        except Exception:
+            logger.exception()
 
     def refresh_grid(self, grid_id: str) -> None:
         # TODO Update doc string.
@@ -401,8 +521,8 @@ class AirQoApi:
                 params=query_params,
                 method="put",
             )
-        except Exception as ex:
-            print(ex)
+        except Exception:
+            logger.exception()
 
     def get_airqlouds(self, tenant: Tenant = Tenant.ALL) -> List[Dict[str, Any]]:
         """
@@ -538,8 +658,8 @@ class AirQoApi:
             # TODO Is there a cleaner way of doing this? End point returns more data than returned to the user. WHY?
             measurement = response["measurements"][0]["pm2_5"]["value"]
             return measurement
-        except Exception as ex:
-            print(ex)
+        except Exception:
+            logger.exception()
             return None
 
     def get_grids(self, tenant: Tenant = Tenant.ALL) -> List[Dict[str, Any]]:
@@ -610,7 +730,7 @@ class AirQoApi:
             for cohort in response.get("cohorts", [])
         ]
 
-    def get_sites(self, tenant: Tenant = Tenant.ALL) -> List[Dict[str, Any]]:
+    def get_sites(self, network: str = "all") -> List[Dict[str, Any]]:
         """
         Retrieve sites given a tenant.
 
@@ -657,10 +777,10 @@ class AirQoApi:
                 },
             ]
         """
-        query_params = {"tenant": str(Tenant.AIRQO)}
+        query_params = {}
 
-        if tenant != Tenant.ALL:
-            query_params["network"] = str(tenant)
+        if network != "all":
+            query_params["network"] = network
 
         response = self.__request("devices/sites", query_params)
 
@@ -668,8 +788,6 @@ class AirQoApi:
             {
                 **site,
                 "site_id": site.get("_id", None),
-                "tenant": site.get("network", site.get("tenant", None)),
-                "location": site.get("location", None),
                 "approximate_latitude": site.get(
                     "approximate_latitude", site.get("latitude", None)
                 ),
@@ -687,60 +805,7 @@ class AirQoApi:
         for i in updated_sites:
             site = dict(i)
             params = {"tenant": str(Tenant.AIRQO), "id": site.pop("site_id")}
-            response = self.__request("devices/sites", params, site, "put")
-            print(response)
-
-    def get_tenants(self, data_source: str) -> List[Dict[str, Any]]:
-        """
-        Retrieve tenants given a data source.
-
-        Args:
-            data_source: The source of the tenant's data.
-
-        Returns:
-            List[Dict[str, Any]]: A list of dictionaries with tenant details.
-
-            [
-                {
-                    "_id": str,
-                    "net_status": str,
-                    "net_email": str,
-                    "net_phoneNumber": int,
-                    "net_category": str,
-                    "net_name": str,
-                    "net_description": str,
-                    "net_website": str,
-                    "net_acronym": str,
-                    "net_api_key": str,
-                    "net_data_source": str,
-                    "createdAt": str,
-                    "net_users": List[Dict[str,Any]],
-                    "net_permissions": List[Dict[str,Any]],
-                    "net_roles": List[Dict[str,Any]],
-                    "net_groups": List[Dict[str,Any]],
-                    "net_departments": List[Dict[str,Any]],
-                    "network_id": str,
-                    "network": str,
-                    "data_source": str,
-                    "api_key": str"
-                },
-            ]
-        """
-        response = self.__request("users/networks")
-
-        return [
-            {
-                **network,
-                **{
-                    "network_id": network.get("_id", None),
-                    "network": network.get("net_name", None),
-                    "data_source": network.get("net_data_source", None),
-                    "api_key": network.get("net_api_key", None),
-                },
-            }
-            for network in response.get("networks", [])
-            if network.get("net_data_source") == str(data_source)
-        ]
+            self.__request("devices/sites", params, site, "put")
 
     def __request(self, endpoint, params=None, body=None, method="get", base_url=None):
         """
@@ -775,7 +840,6 @@ class AirQoApi:
         http = urllib3.PoolManager(retries=retry_strategy)
 
         url = f"{base_url}/{endpoint}"
-        print(url)
         try:
             if method == "put" or method == "post":
                 headers["Content-Type"] = "application/json"
@@ -797,11 +861,8 @@ class AirQoApi:
                     method.upper(), url, fields=params, headers=headers
                 )
             else:
-                print("Method not supported")
+                logger.exception("Method not supported")
                 return None
-
-            print(response._request_url)
-            print(response.data)
 
             if response.status == 200 or response.status == 201:
                 return simplejson.loads(response.data)
@@ -809,6 +870,6 @@ class AirQoApi:
                 Utils.handle_api_error(response)
                 return None
 
-        except urllib3.exceptions.HTTPError as e:
-            print(f"HTTPError: {e}")
+        except urllib3.exceptions.HTTPError as ex:
+            logger.exception(f"HTTPError: {ex}")
             return None

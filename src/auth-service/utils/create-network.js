@@ -1,6 +1,7 @@
 const constants = require("@config/constants");
 const NetworkModel = require("@models/Network");
 const PermissionModel = require("@models/Permission");
+const RoleModel = require("@models/Role");
 const UserModel = require("@models/User");
 const { logElement, logText, logObject } = require("./log");
 const generateFilter = require("./generate-filter");
@@ -141,6 +142,14 @@ const createNetwork = {
   },
   create: async (request, next) => {
     try {
+      return {
+        success: false,
+        message: "Service Temporarily Unavailable",
+        errors: {
+          message: "Service Temporarily Unavailable",
+        },
+        status: httpStatus.SERVICE_UNAVAILABLE,
+      };
       const { body, query } = request;
       const { tenant } = query;
 
@@ -722,7 +731,7 @@ const createNetwork = {
       const network = await NetworkModel(tenant).findById(net_id).lean();
 
       if (isEmpty(user)) {
-        next(
+        return next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
             message: "User not found",
           })
@@ -730,7 +739,7 @@ const createNetwork = {
       }
 
       if (isEmpty(network)) {
-        next(
+        return next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
             message: "Network not found",
           })
@@ -741,17 +750,20 @@ const createNetwork = {
         network.net_manager &&
         network.net_manager.toString() === user_id.toString()
       ) {
-        next(
+        return next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
             message: `User ${user_id.toString()} is already the network manager`,
           })
         );
       }
 
-      if (
-        !user.networks.map((id) => id.toString()).includes(net_id.toString())
-      ) {
-        next(
+      // Updated check to use network_roles array
+      const userNetworkIds = user.network_roles.map((networkRole) =>
+        networkRole.network.toString()
+      );
+
+      if (!userNetworkIds.includes(net_id.toString())) {
+        return next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
             message: `Network ${net_id.toString()} is not part of User's networks, not authorized to manage this network`,
           })
@@ -772,7 +784,7 @@ const createNetwork = {
           data: updatedNetwork,
         };
       } else {
-        next(
+        return next(
           new HttpError("Bad Request", httpStatus.BAD_REQUEST, {
             message: "No network record was updated",
           })
@@ -780,7 +792,7 @@ const createNetwork = {
       }
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
-      next(
+      return next(
         new HttpError(
           "Internal Server Error",
           httpStatus.INTERNAL_SERVER_ERROR,
@@ -823,9 +835,11 @@ const createNetwork = {
     try {
       return {
         success: false,
-        message: "Network deletion temporarily disabled",
-        status: httpStatus.NOT_IMPLEMENTED,
-        errors: { message: "Network deletion temporarily disabled" },
+        message: "Service Temporarily Unavailable",
+        errors: {
+          message: "Service Temporarily Unavailable",
+        },
+        status: httpStatus.SERVICE_UNAVAILABLE,
       };
       logText("the delete operation.....");
       const { query } = request;
@@ -834,7 +848,7 @@ const createNetwork = {
       const filter = generateFilter.networks(request, next);
 
       if (isEmpty(filter._id)) {
-        next(
+        return next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
             message:
               "the network ID is missing -- required when updating corresponding users",
@@ -842,33 +856,65 @@ const createNetwork = {
         );
       }
 
-      const result = await UserModel(tenant).updateMany(
+      // First, remove network roles from users
+      const userUpdateResult = await UserModel(tenant).updateMany(
         { "network_roles.network": filter._id },
         { $pull: { network_roles: { network: filter._id } } }
       );
 
-      if (result.nModified > 0) {
+      if (userUpdateResult.nModified > 0) {
         logger.info(
-          `Removed network ${filter._id} from ${result.nModified} users.`
+          `Removed network ${filter._id} from ${userUpdateResult.nModified} users.`
         );
       }
 
-      if (result.n === 0) {
-        logger.info(
-          `Network ${filter._id} was not found in any users' network_roles.`
-        );
-      }
-      const responseFromRemoveNetwork = await NetworkModel(tenant).remove(
+      // Find and delete permissions associated with this network
+      const permissionDeleteResult = await PermissionModel(tenant).deleteMany({
+        network_id: filter._id,
+      });
+
+      logger.info(
+        `Deleted ${permissionDeleteResult.deletedCount} permissions associated with network ${filter._id}`
+      );
+
+      // Find and delete roles associated with this network
+      // Note: Do this after deleting permissions to avoid ref issues
+      const roleDeleteResult = await RoleModel(tenant).deleteMany({
+        network_id: filter._id,
+      });
+
+      logger.info(
+        `Deleted ${roleDeleteResult.deletedCount} roles associated with network ${filter._id}`
+      );
+
+      // Delete the network itself
+      const networkDeleteResult = await NetworkModel(tenant).remove(
         {
           filter,
         },
         next
       );
-      logObject("responseFromRemoveNetwork", responseFromRemoveNetwork);
-      return responseFromRemoveNetwork;
+      const data = {
+        userUpdate: {
+          modifiedCount: userUpdateResult.nModified,
+          matchedCount: userUpdateResult.n,
+        },
+        permissionDelete: {
+          deletedCount: permissionDeleteResult.deletedCount,
+        },
+        roleDelete: {
+          deletedCount: roleDeleteResult.deletedCount,
+        },
+        networkDelete: networkDeleteResult.data,
+      };
+
+      return {
+        ...networkDeleteResult,
+        data,
+      };
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
-      next(
+      return next(
         new HttpError(
           "Internal Server Error",
           httpStatus.INTERNAL_SERVER_ERROR,
@@ -978,7 +1024,7 @@ const createNetwork = {
   },
   listAvailableUsers: async (request, next) => {
     try {
-      const { tenant } = request.query;
+      const { tenant, skip, limit } = request.query;
       const { net_id } = request.params;
       const network = await NetworkModel(tenant).findById(net_id);
       if (!network) {
@@ -989,7 +1035,10 @@ const createNetwork = {
         );
       }
 
+      const usersFilter = generateFilter.users(request, next);
+
       const filter = {
+        ...usersFilter,
         "network_roles.network": { $ne: net_id },
         category: "networks",
       };
@@ -997,6 +1046,8 @@ const createNetwork = {
       let responseFromListAvailableUsers = await UserModel(tenant).list(
         {
           filter,
+          skip,
+          limit,
         },
         next
       );
@@ -1018,7 +1069,7 @@ const createNetwork = {
   },
   listAssignedUsers: async (request, next) => {
     try {
-      const { tenant } = request.query;
+      const { tenant, skip, limit } = request.query;
       const { net_id } = request.params;
 
       const network = await NetworkModel(tenant).findById(net_id);
@@ -1031,7 +1082,10 @@ const createNetwork = {
         );
       }
 
+      const usersFilter = generateFilter.users(request, next);
+
       const filter = {
+        ...usersFilter,
         "network_roles.network": net_id,
         category: "networks",
       };
@@ -1039,6 +1093,8 @@ const createNetwork = {
       let responseFromListAssignedUsers = await UserModel(tenant).list(
         {
           filter,
+          skip,
+          limit,
         },
         next
       );

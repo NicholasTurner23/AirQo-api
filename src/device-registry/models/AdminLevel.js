@@ -102,12 +102,13 @@ adminLevelSchema.statics.list = async function(
   try {
     const inclusionProjection = constants.ADMIN_LEVEL_INCLUSION_PROJECTION;
     const exclusionProjection = constants.ADMIN_LEVEL_EXCLUSION_PROJECTION(
-      filter.category ? filter.category : "none"
+      filter.path ? filter.path : "none"
     );
 
-    if (!isEmpty(filter.category)) {
-      delete filter.category;
+    if (!isEmpty(filter.path)) {
+      delete filter.path;
     }
+
     if (!isEmpty(filter.dashboard)) {
       delete filter.dashboard;
     }
@@ -235,12 +236,14 @@ adminLevelSchema.statics.remove = async function({ filter = {} } = {}, next) {
 };
 
 const AdminLevelModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     const adminlevels = mongoose.model("adminlevels");
     return adminlevels;
   } catch (error) {
     const adminlevels = getModelByTenant(
-      tenant,
+      dbTenant,
       "adminlevel",
       adminLevelSchema
     );

@@ -72,8 +72,14 @@ WhitelistedIPSchema.statics = {
       }
 
       logger.error(`🐛🐛 Internal Server Error -- ${err.message}`);
-      next(new HttpError(message, status, response));
-      return;
+      return {
+        success: false,
+        message,
+        status,
+        errors: response,
+      };
+      // next(new HttpError(message, status, response));
+      // return;
     }
   },
   async list({ skip = 0, limit = 100, filter = {} } = {}, next) {
@@ -205,11 +211,13 @@ WhitelistedIPSchema.methods = {
 };
 
 const WhitelistedIPModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     let ips = mongoose.model("WhitelistedIPs");
     return ips;
   } catch (error) {
-    let ips = getModelByTenant(tenant, "WhitelistedIP", WhitelistedIPSchema);
+    let ips = getModelByTenant(dbTenant, "WhitelistedIP", WhitelistedIPSchema);
     return ips;
   }
 };

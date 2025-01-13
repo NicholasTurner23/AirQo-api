@@ -17,6 +17,7 @@ const logger = require("log4js").getLogger(
 const validUserTypes = ["user", "guest"];
 const { HttpError } = require("@utils/errors");
 const mailer = require("@utils/mailer");
+const ORGANISATIONS_LIMIT = 6;
 
 function oneMonthFromNow() {
   var d = new Date();
@@ -138,10 +139,9 @@ const UserSchema = new Schema(
       validate: [
         {
           validator: function (value) {
-            const maxLimit = 6;
-            return value.length <= maxLimit;
+            return value.length <= ORGANISATIONS_LIMIT;
           },
-          message: "Too many networks. Maximum limit: 6.",
+          message: `Too many networks. Maximum limit: ${ORGANISATIONS_LIMIT}`,
         },
       ],
     },
@@ -167,10 +167,9 @@ const UserSchema = new Schema(
       validate: [
         {
           validator: function (value) {
-            const maxLimit = 6;
-            return value.length <= maxLimit;
+            return value.length <= ORGANISATIONS_LIMIT;
           },
-          message: "Too many groups. Maximum limit: 6.",
+          message: `Too many groups. Maximum limit: ${ORGANISATIONS_LIMIT}`,
         },
       ],
     },
@@ -235,6 +234,37 @@ const UserSchema = new Schema(
     },
     google_id: { type: String, trim: true },
     timezone: { type: String, trim: true },
+    subscriptionStatus: {
+      type: String,
+      enum: ["inactive", "active", "past_due", "cancelled"],
+      default: "inactive",
+    },
+    currentSubscriptionId: {
+      type: String,
+    },
+    lastSubscriptionCheck: {
+      type: Date,
+    },
+    subscriptionCancelledAt: {
+      type: Date,
+    },
+    automaticRenewal: {
+      type: Boolean,
+      default: false,
+    },
+    nextBillingDate: {
+      type: Date,
+    },
+    lastRenewalDate: {
+      type: Date,
+    },
+    currentPlanDetails: {
+      type: {
+        priceId: String,
+        currency: String,
+        billingCycle: String, // 'monthly', 'annual', etc.
+      },
+    },
   },
   { timestamps: true }
 );
@@ -247,83 +277,356 @@ UserSchema.path("group_roles.userType").validate(function (value) {
   return validUserTypes.includes(value);
 }, "Invalid userType value");
 
-UserSchema.pre("save", function (next) {
-  if (this.isModified("password")) {
-    this.password = bcrypt.hashSync(this.password, saltRounds);
-  }
-  if (!this.email && !this.phoneNumber) {
-    return next(new Error("Phone number or email is required!"));
-  }
+UserSchema.pre(
+  ["updateOne", "findOneAndUpdate", "updateMany", "update", "save"],
+  async function (next) {
+    // Determine if this is a new document or an update
+    const isNew = this.isNew;
 
-  if (!this.network_roles || this.network_roles.length === 0) {
-    if (
-      !constants ||
-      !constants.DEFAULT_NETWORK ||
-      !constants.DEFAULT_NETWORK_ROLE
-    ) {
-      throw new HttpError(
-        "Internal Server Error",
-        httpStatus.INTERNAL_SERVER_ERROR,
-        {
-          message:
-            "Contact support@airqo.net -- unable to retrieve the default Network or Role to which the User will belong",
-        }
-      );
+    // Safely get updates object, accounting for different mongoose operations
+    let updates = {};
+    if (this.getUpdate) {
+      updates = this.getUpdate() || {};
+    } else if (!isNew) {
+      updates = this.toObject();
+    } else {
+      updates = this;
     }
 
-    this.network_roles = [
-      {
-        network: mongoose.Types.ObjectId(constants.DEFAULT_NETWORK),
-        userType: "guest",
-        createdAt: new Date(),
-        role: mongoose.Types.ObjectId(constants.DEFAULT_NETWORK_ROLE),
-      },
-    ];
-  }
+    try {
+      // Helper function to handle role updates
+      const handleRoleUpdates = async (fieldName, idField) => {
+        const query = this.getQuery ? this.getQuery() : { _id: this._id };
 
-  if (!this.group_roles || this.group_roles.length === 0) {
-    if (
-      !constants ||
-      !constants.DEFAULT_GROUP ||
-      !constants.DEFAULT_GROUP_ROLE
-    ) {
-      throw new HttpError(
-        "Internal Server Error",
-        httpStatus.INTERNAL_SERVER_ERROR,
-        {
-          message:
-            "Contact support@airqo.net -- unable to retrieve the default Group or Role to which the User will belong",
+        // Get the correct tenant-specific model
+        const tenant = this.tenant || constants.DEFAULT_TENANT || "airqo";
+        const User = getModelByTenant(tenant, "user", UserSchema);
+        const doc = await User.findOne(query);
+        if (!doc) return;
+
+        let newRoles = [];
+        const existingRoles = doc[fieldName] || [];
+
+        // Initialize update operators safely
+        updates.$set = updates.$set || {};
+        updates.$push = updates.$push || {};
+        updates.$addToSet = updates.$addToSet || {};
+
+        // Handle update operations in order of precedence
+        if (updates.$set && updates.$set[fieldName]) {
+          // $set takes precedence as it's a direct override
+          newRoles = updates.$set[fieldName];
+        } else if (updates.$push && updates.$push[fieldName]) {
+          // Safely handle $push with potential $each operator
+          const pushValue = updates.$push[fieldName];
+          if (pushValue) {
+            if (pushValue.$each && Array.isArray(pushValue.$each)) {
+              newRoles = [...existingRoles, ...pushValue.$each];
+            } else {
+              newRoles = [...existingRoles, pushValue];
+            }
+          }
+        } else if (updates.$addToSet && updates.$addToSet[fieldName]) {
+          // Safely handle $addToSet
+          const addToSetValue = updates.$addToSet[fieldName];
+          if (addToSetValue) {
+            if (addToSetValue.$each && Array.isArray(addToSetValue.$each)) {
+              newRoles = [...existingRoles, ...addToSetValue.$each];
+            } else {
+              newRoles = [...existingRoles, addToSetValue];
+            }
+          }
+        } else if (updates[fieldName]) {
+          // Direct field update
+          newRoles = updates[fieldName];
         }
-      );
+
+        if (newRoles.length > 0) {
+          // Create a Map to store unique roles based on network/group
+          const uniqueRoles = new Map();
+
+          // Process existing roles first
+          existingRoles.forEach((role) => {
+            const id = role[idField] && role[idField].toString();
+            if (id) {
+              uniqueRoles.set(id, role);
+            }
+          });
+
+          // Process new roles, overwriting existing ones if same network/group
+          newRoles.forEach((role) => {
+            const id = role[idField] && role[idField].toString();
+            if (id) {
+              uniqueRoles.set(id, role);
+            }
+          });
+
+          // Convert Map values back to array
+          const finalRoles = Array.from(uniqueRoles.values());
+
+          // Set the final filtered array using $set and clean up other operators
+          updates.$set[fieldName] = finalRoles;
+          delete updates.$push[fieldName];
+          delete updates.$addToSet[fieldName];
+          delete updates[fieldName]; // Clean up direct field update if any
+        }
+      };
+
+      // Process both network_roles and group_roles
+      await handleRoleUpdates("network_roles", "network");
+      await handleRoleUpdates("group_roles", "group");
+
+      // Password hashing
+      if (
+        (isNew && this.password) ||
+        (updates &&
+          (updates.password || (updates.$set && updates.$set.password)))
+      ) {
+        const passwordToHash = isNew
+          ? this.password
+          : updates.password || (updates.$set && updates.$set.password);
+
+        if (isNew) {
+          this.password = bcrypt.hashSync(passwordToHash, saltRounds);
+        } else {
+          if (updates && updates.password) {
+            updates.password = bcrypt.hashSync(passwordToHash, saltRounds);
+          }
+          if (updates && updates.$set && updates.$set.password) {
+            updates.$set.password = bcrypt.hashSync(passwordToHash, saltRounds);
+          }
+        }
+      }
+
+      // Validation only for new documents
+      if (isNew) {
+        // Validate contact information - only for new documents
+        if (!this.email && !this.phoneNumber) {
+          return next(new Error("Phone number or email is required!"));
+        }
+
+        // Profile picture validation - only for new documents
+        if (
+          this.profilePicture &&
+          !validateProfilePicture(this.profilePicture)
+        ) {
+          return next(
+            new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
+              message: "Invalid profile picture URL",
+            })
+          );
+        }
+
+        // Network roles handling - only for new documents
+        if (!this.network_roles || this.network_roles.length === 0) {
+          if (
+            !constants ||
+            !constants.DEFAULT_NETWORK ||
+            !constants.DEFAULT_NETWORK_ROLE
+          ) {
+            throw new HttpError(
+              "Internal Server Error",
+              httpStatus.INTERNAL_SERVER_ERROR,
+              {
+                message:
+                  "Contact support@airqo.net -- unable to retrieve the default Network or Role to which the User will belong",
+              }
+            );
+          }
+
+          this.network_roles = [
+            {
+              network: mongoose.Types.ObjectId(constants.DEFAULT_NETWORK),
+              userType: "guest",
+              createdAt: new Date(),
+              role: mongoose.Types.ObjectId(constants.DEFAULT_NETWORK_ROLE),
+            },
+          ];
+        }
+
+        // Group roles handling - only for new documents
+        if (!this.group_roles || this.group_roles.length === 0) {
+          if (
+            !constants ||
+            !constants.DEFAULT_GROUP ||
+            !constants.DEFAULT_GROUP_ROLE
+          ) {
+            throw new HttpError(
+              "Internal Server Error",
+              httpStatus.INTERNAL_SERVER_ERROR,
+              {
+                message:
+                  "Contact support@airqo.net -- unable to retrieve the default Group or Role",
+              }
+            );
+          }
+
+          this.group_roles = [
+            {
+              group: mongoose.Types.ObjectId(constants.DEFAULT_GROUP),
+              userType: "guest",
+              createdAt: new Date(),
+              role: mongoose.Types.ObjectId(constants.DEFAULT_GROUP_ROLE),
+            },
+          ];
+        }
+
+        // Ensure default values for new documents
+        this.verified = this.verified ?? false;
+        this.analyticsVersion = this.analyticsVersion ?? 2;
+
+        // Permissions handling for new documents
+        if (this.permissions && this.permissions.length > 0) {
+          this.permissions = [...new Set(this.permissions)];
+        }
+      }
+
+      // For updates, only validate if specific fields are provided
+      if (this.getUpdate) {
+        const fieldsToValidate = [
+          "_id",
+          "firstName",
+          "lastName",
+          "userName",
+          "email",
+          "organization",
+          "long_organization",
+          "privilege",
+          "country",
+          "profilePicture",
+          "phoneNumber",
+          "createdAt",
+          "updatedAt",
+          "rateLimit",
+          "lastLogin",
+          "iat",
+        ];
+
+        // Get all actual fields being updated from both root and $set
+        const actualUpdates = {
+          ...(updates || {}),
+          ...(updates.$set || {}),
+        };
+
+        // Profile picture validation for updates
+        if (actualUpdates.profilePicture) {
+          if (!validateProfilePicture(actualUpdates.profilePicture)) {
+            return next(
+              new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
+                message: "Invalid profile picture URL",
+              })
+            );
+          }
+        }
+
+        // Conditional validations for updates
+        // Only validate fields that are present in the update
+        fieldsToValidate.forEach((field) => {
+          if (field in actualUpdates) {
+            const value = actualUpdates[field];
+            if (value === undefined || value === null || value === "") {
+              return next(
+                new HttpError("Validation Error", httpStatus.BAD_REQUEST, {
+                  message: `${field} cannot be empty, null, or undefined`,
+                })
+              );
+            }
+          }
+        });
+
+        // Prevent modification of certain immutable fields
+        const immutableFields = ["firebase_uid", "email", "createdAt", "_id"];
+        immutableFields.forEach((field) => {
+          if (updates[field]) delete updates[field];
+          if (updates && updates.$set && updates.$set[field]) {
+            return next(
+              new HttpError(
+                "Modification Not Allowed",
+                httpStatus.BAD_REQUEST,
+                { message: `Cannot modify ${field} after creation` }
+              )
+            );
+          }
+          if (updates && updates.$set) delete updates.$set[field];
+          if (updates.$push) delete updates.$push[field];
+        });
+
+        // Conditional network roles validation
+        if (updates.network_roles) {
+          if (updates.network_roles.length > ORGANISATIONS_LIMIT) {
+            return next(
+              new HttpError("Validation Error", httpStatus.BAD_REQUEST, {
+                message: `Maximum ${ORGANISATIONS_LIMIT} network roles allowed`,
+              })
+            );
+          }
+        }
+
+        // Conditional group roles validation
+        if (updates.group_roles) {
+          if (updates.group_roles.length > ORGANISATIONS_LIMIT) {
+            return next(
+              new HttpError("Validation Error", httpStatus.BAD_REQUEST, {
+                message: `Maximum ${ORGANISATIONS_LIMIT} group roles allowed`,
+              })
+            );
+          }
+        }
+
+        // Conditional permissions validation
+        if (updates.permissions) {
+          const uniquePermissions = [...new Set(updates.permissions)];
+          if (updates && updates.$set) {
+            updates.$set.permissions = uniquePermissions;
+          } else {
+            updates.permissions = uniquePermissions;
+          }
+        }
+
+        // Conditional default values for updates
+        if (updates && updates.$set) {
+          updates.$set.verified = updates.$set.verified ?? false;
+          updates.$set.analyticsVersion = updates.$set.analyticsVersion ?? 2;
+        } else {
+          updates.verified = updates.verified ?? false;
+          updates.analyticsVersion = updates.analyticsVersion ?? 2;
+        }
+      }
+
+      // Additional checks for new documents
+      if (isNew) {
+        const requiredFields = ["firstName", "lastName", "email"];
+        requiredFields.forEach((field) => {
+          if (!this[field]) {
+            return next(new Error(`${field} is required`));
+          }
+        });
+
+        if (this.network_roles && this.network_roles.length > 0) {
+          const uniqueNetworks = new Map();
+          this.network_roles.forEach((role) => {
+            // Keep only the latest role for each network
+            uniqueNetworks.set(role.network.toString(), role);
+          });
+          this.network_roles = Array.from(uniqueNetworks.values());
+        }
+        // Handle group_roles duplicates
+        if (this.group_roles && this.group_roles.length > 0) {
+          const uniqueGroups = new Map();
+          this.group_roles.forEach((role) => {
+            // Keep only the latest role for each group
+            uniqueGroups.set(role.group.toString(), role);
+          });
+          this.group_roles = Array.from(uniqueGroups.values());
+        }
+      }
+
+      return next();
+    } catch (error) {
+      return next(error);
     }
-
-    this.group_roles = [
-      {
-        group: mongoose.Types.ObjectId(constants.DEFAULT_GROUP),
-        userType: "guest",
-        createdAt: new Date(),
-        role: mongoose.Types.ObjectId(constants.DEFAULT_GROUP_ROLE),
-      },
-    ];
   }
-
-  if (!this.verified) {
-    this.verified = false;
-  }
-
-  if (!this.analyticsVersion) {
-    this.analyticsVersion = 2;
-  }
-
-  return next();
-});
-
-UserSchema.pre("update", function (next) {
-  if (this.isModified("password")) {
-    this.password = bcrypt.hashSync(this.password, saltRounds);
-  }
-  return next();
-});
+);
 
 UserSchema.index({ email: 1 }, { unique: true });
 UserSchema.index({ userName: 1 }, { unique: true });
@@ -483,7 +786,10 @@ UserSchema.statics = {
       }
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error -- ${error.message}`);
-      next(
+      if (error instanceof HttpError) {
+        return next(error);
+      }
+      return next(
         new HttpError(
           "Internal Server Error",
           httpStatus.INTERNAL_SERVER_ERROR,
@@ -503,6 +809,8 @@ UserSchema.statics = {
         delete filter.category;
       }
       logObject("the filter being used", filter);
+      const totalCount = await this.countDocuments(filter).exec();
+
       const response = await this.aggregate()
         .match(filter)
         .lookup({
@@ -670,14 +978,15 @@ UserSchema.statics = {
         .project(inclusionProjection)
         .project(exclusionProjection)
         .sort({ createdAt: -1 })
-        .skip(skip ? skip : 0)
-        .limit(limit ? limit : parseInt(constants.DEFAULT_LIMIT))
+        .skip(skip ? parseInt(skip) : 0)
+        .limit(limit ? parseInt(limit) : parseInt(constants.DEFAULT_LIMIT))
         .allowDiskUse(true);
       if (!isEmpty(response)) {
         return {
           success: true,
           message: "successfully retrieved the user details",
           data: response,
+          totalCount,
           status: httpStatus.OK,
         };
       } else if (isEmpty(response)) {
@@ -685,12 +994,16 @@ UserSchema.statics = {
           success: true,
           message: "no users exist",
           data: [],
+          totalCount,
           status: httpStatus.OK,
         };
       }
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error -- ${error.message}`);
-      next(
+      if (error instanceof HttpError) {
+        return next(error);
+      }
+      return next(
         new HttpError(
           "Internal Server Error",
           httpStatus.INTERNAL_SERVER_ERROR,
@@ -702,78 +1015,40 @@ UserSchema.statics = {
   async modify({ filter = {}, update = {} } = {}, next) {
     try {
       logText("the user modification function........");
-      let options = { new: true };
+      const options = { new: true };
       const fieldNames = Object.keys(update);
       const fieldsString = fieldNames.join(" ");
-      let modifiedUpdate = update;
-      modifiedUpdate["$addToSet"] = {};
 
-      if (update.password) {
-        modifiedUpdate.password = bcrypt.hashSync(update.password, saltRounds);
-      }
-
-      if (modifiedUpdate.profilePicture) {
-        if (!validateProfilePicture(modifiedUpdate.profilePicture)) {
-          next(
-            new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
-              message: "Invalid profile picture URL",
-            })
-          );
-        }
-      }
-
-      if (modifiedUpdate.network_roles) {
-        if (isEmpty(modifiedUpdate.network_roles.network)) {
-          delete modifiedUpdate.network_roles;
-        } else {
-          modifiedUpdate["$addToSet"] = {
-            network_roles: { $each: modifiedUpdate.network_roles },
-          };
-          delete modifiedUpdate.network_roles;
-        }
-      }
-
-      if (modifiedUpdate.group_roles) {
-        if (isEmpty(modifiedUpdate.group_roles.group)) {
-          delete modifiedUpdate.group_roles;
-        } else {
-          modifiedUpdate["$addToSet"] = {
-            group_roles: { $each: modifiedUpdate.group_roles },
-          };
-          delete modifiedUpdate.group_roles;
-        }
-      }
-
-      if (modifiedUpdate.permissions) {
-        modifiedUpdate["$addToSet"]["permissions"] = {};
-        modifiedUpdate["$addToSet"]["permissions"]["$each"] =
-          modifiedUpdate.permissions;
-        delete modifiedUpdate["permissions"];
-      }
-
+      // Find and update user
       const updatedUser = await this.findOneAndUpdate(
         filter,
-        modifiedUpdate,
+        update,
         options
       ).select(fieldsString);
 
+      // Handle update result
       if (!isEmpty(updatedUser)) {
+        const { _id, ...userData } = updatedUser._doc;
         return {
           success: true,
           message: "successfully modified the user",
-          data: updatedUser._doc,
+          data: userData,
           status: httpStatus.OK,
         };
-      } else if (isEmpty(updatedUser)) {
-        next(
-          new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
-            message: "user does not exist, please crosscheck",
-          })
-        );
       }
+
+      // User not found
+      return next(
+        new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
+          message: "user does not exist, please crosscheck",
+        })
+      );
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error -- ${error.message}`);
-      next(
+      if (error instanceof HttpError) {
+        return next(error);
+      }
+      return next(
         new HttpError(
           "Internal Server Error",
           httpStatus.INTERNAL_SERVER_ERROR,
@@ -812,7 +1087,10 @@ UserSchema.statics = {
     } catch (error) {
       logObject("the models error", error);
       logger.error(`🐛🐛 Internal Server Error -- ${error.message}`);
-      next(
+      if (error instanceof HttpError) {
+        return next(error);
+      }
+      return next(
         new HttpError(
           "Internal Server Error",
           httpStatus.INTERNAL_SERVER_ERROR,
@@ -879,15 +1157,6 @@ UserSchema.methods = {
   },
 };
 
-const UserModel = (tenant) => {
-  try {
-    let users = mongoose.model("users");
-    return users;
-  } catch (error) {
-    let users = getModelByTenant(tenant, "user", UserSchema);
-    return users;
-  }
-};
 UserSchema.methods.createToken = async function () {
   try {
     const filter = { _id: this._id };
@@ -930,6 +1199,18 @@ UserSchema.methods.createToken = async function () {
     }
   } catch (error) {
     logger.error(`🐛🐛 Internal Server Error --- ${error.message}`);
+  }
+};
+
+const UserModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
+  try {
+    let users = mongoose.model("users");
+    return users;
+  } catch (error) {
+    let users = getModelByTenant(dbTenant, "user", UserSchema);
+    return users;
   }
 };
 

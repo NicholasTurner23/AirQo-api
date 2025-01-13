@@ -1,4 +1,5 @@
 const SiteModel = require("@models/Site");
+const ActivityModel = require("@models/Activity");
 const UniqueIdentifierCounterModel = require("@models/UniqueIdentifierCounter");
 const constants = require("@config/constants");
 const { logObject, logElement, logText } = require("./log");
@@ -15,6 +16,7 @@ const logger = require("log4js").getLogger(
   `${constants.ENVIRONMENT} -- create-site-util`
 );
 const distanceUtil = require("@utils/distance");
+const stringify = require("@utils/stringify");
 const createAirqloudUtil = require("@utils/create-airqloud");
 const geolib = require("geolib");
 const { HttpError } = require("@utils/errors");
@@ -318,7 +320,19 @@ const createSite = {
     try {
       const { body, query } = request;
       const { tenant } = query;
-      const { name, latitude, longitude, approximate_distance_in_km } = body;
+
+      const {
+        name,
+        latitude,
+        longitude,
+        approximate_distance_in_km,
+        network,
+        userName,
+        lastName,
+        firstName,
+        user_id,
+        group,
+      } = body;
 
       const responseFromApproximateCoordinates = createSite.createApproximateCoordinates(
         { latitude, longitude, approximate_distance_in_km },
@@ -353,7 +367,7 @@ const createSite = {
         };
       }
 
-      let lat_long = createSite.generateLatLong(latitude, longitude, next);
+      let lat_long = createSite.generateLatLong(latitude, longitude);
       request["body"]["lat_long"] = lat_long;
 
       let responseFromGenerateName = await createSite.generateName(
@@ -387,7 +401,33 @@ const createSite = {
       logObject("responseFromCreateSite in the util", responseFromCreateSite);
 
       if (responseFromCreateSite.success === true) {
-        let createdSite = responseFromCreateSite.data;
+        const createdSite = responseFromCreateSite.data;
+        try {
+          const siteActivityBody = {
+            date: new Date(),
+            description: "site created",
+            activityType: "site-creation",
+            site_id: createdSite._id,
+            ...(network && { network }),
+            ...(userName && { userName }),
+            ...(lastName && { lastName }),
+            ...(firstName && { firstName }),
+            ...(user_id && { user_id }),
+            ...(group && { group }),
+          };
+
+          const responseFromRegisterActivity = await ActivityModel(
+            tenant
+          ).register(siteActivityBody, next);
+          if (responseFromRegisterActivity.success === false) {
+            logger.error(
+              "Unable to store the site activity for this operation."
+            );
+          }
+        } catch (error) {
+          logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+        }
+
         try {
           const kafkaProducer = kafka.producer({
             groupId: constants.UNIQUE_PRODUCER_GROUP,
@@ -405,7 +445,7 @@ const createSite = {
           await kafkaProducer.disconnect();
         } catch (error) {
           logObject("error", error);
-          logger.error(`internal server error -- ${error.message}`);
+          logger.error(`🐛🐛 Internal Server Error -- ${error.message}`);
         }
 
         return responseFromCreateSite;
@@ -439,6 +479,89 @@ const createSite = {
       return responseFromModifySite;
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+    }
+  },
+  updateManySites: async (request, next) => {
+    try {
+      const { tenant } = request.query;
+      const { siteIds, updateData } = request.body;
+
+      // Find existing sites
+      const existingSites = await SiteModel(tenant)
+        .find({
+          _id: { $in: siteIds },
+        })
+        .select("_id");
+
+      // Create sets for comparison
+      const existingSiteIds = new Set(
+        existingSites.map((site) => site._id.toString())
+      );
+      const providedSiteIds = new Set(siteIds.map((id) => id.toString()));
+
+      // Identify non-existent site IDs
+      const nonExistentSiteIds = siteIds.filter(
+        (id) => !existingSiteIds.has(id.toString())
+      );
+
+      // If there are non-existent sites, prepare a detailed error
+      if (nonExistentSiteIds.length > 0) {
+        return next(
+          new HttpError("Bad Request", httpStatus.BAD_REQUEST, {
+            message: "Some provided site IDs do not exist",
+            nonExistentSiteIds: nonExistentSiteIds,
+            existingSiteIds: Array.from(existingSiteIds),
+            totalProvidedSiteIds: siteIds.length,
+            existingSiteCount: existingSites.length,
+          })
+        );
+      }
+
+      // Prepare filter
+      const filter = {
+        _id: { $in: Array.from(providedSiteIds) },
+      };
+
+      // Additional filtering from generateFilter if needed
+      const additionalFilter = generateFilter.sites(request, next);
+      Object.assign(filter, additionalFilter);
+
+      // Optimize options for bulk update
+      const opts = {
+        new: true,
+        multi: true,
+        runValidators: true,
+        context: "query",
+      };
+
+      // Perform bulk update
+      const responseFromBulkModifySites = await SiteModel(tenant).bulkModify(
+        {
+          filter,
+          update: updateData,
+          opts,
+        },
+        next
+      );
+
+      // Attach additional metadata to the response
+      return {
+        ...responseFromBulkModifySites,
+        metadata: {
+          totalSitesUpdated: responseFromBulkModifySites.data.modifiedCount,
+          requestedSiteIds: Array.from(providedSiteIds),
+          existingSiteIds: Array.from(existingSiteIds),
+        },
+      };
+    } catch (error) {
+      logger.error(`🐛🐛 Bulk Update Error: ${error.message}`);
       next(
         new HttpError(
           "Internal Server Error",
@@ -686,7 +809,7 @@ const createSite = {
         request["body"]["name"] = availableName;
       }
 
-      let lat_long = createSite.generateLatLong(latitude, longitude, next);
+      let lat_long = createSite.generateLatLong(latitude, longitude);
       request["body"]["lat_long"] = lat_long;
 
       if (isEmpty(request["body"]["generated_name"])) {
@@ -836,8 +959,11 @@ const createSite = {
   },
   list: async (request, next) => {
     try {
-      const { skip, limit, tenant } = request.query;
+      const { skip, limit, tenant, path } = request.query;
       const filter = generateFilter.sites(request, next);
+      if (!isEmpty(path)) {
+        filter.path = path;
+      }
       const responseFromListSite = await SiteModel(tenant).list(
         {
           filter,
@@ -868,7 +994,6 @@ const createSite = {
       );
     }
   },
-
   listAirQoActive: async (request, next) => {
     try {
       const { skip, limit, tenant } = request.query;
@@ -903,7 +1028,6 @@ const createSite = {
       );
     }
   },
-
   formatSiteName: (name, next) => {
     try {
       let nameWithoutWhiteSpace = name.replace(/\s/g, "");
@@ -1074,7 +1198,7 @@ const createSite = {
       );
     }
   },
-  generateLatLong: (lat, long, next) => {
+  generateLatLong: (lat, long) => {
     try {
       return `${lat}_${long}`;
     } catch (error) {

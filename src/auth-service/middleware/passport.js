@@ -49,7 +49,7 @@ const setLocalOptions = (req, res, next) => {
 
     return {
       success: true,
-      message: "the auth fields have been set",
+      message: "all the auth fields have been set",
       authenticationFields,
     };
   } catch (e) {
@@ -275,7 +275,7 @@ const useGoogleStrategy = (tenant, req, res, next) =>
     {
       clientID: constants.GOOGLE_CLIENT_ID,
       clientSecret: constants.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${constants.PLATFORM_BASE_URL}/api/v1/users/auth/google/callback`,
+      callbackURL: `${constants.PLATFORM_BASE_URL}/api/v2/users/auth/google/callback`,
     },
     async (accessToken, refreshToken, profile, cb) => {
       logObject("Google profile Object", profile._json);
@@ -373,6 +373,8 @@ const useJWTStrategy = (tenant, req, res, next) =>
       const hostName = req.headers["x-host-name"];
       const endpoint = req.headers["x-original-uri"];
       const clientOriginalIp = req.headers["x-client-original-ip"];
+      const requestBody = req.body;
+      logObject("Request Body", requestBody);
 
       let service = req.headers["service"] || "unknown";
       let userAction = "unknown";

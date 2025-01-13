@@ -1,14 +1,38 @@
-import traceback
-
+from itertools import chain
+import logging
 import numpy as np
 import pandas as pd
 
 from airqo_etl_utils.bigquery_api import BigQueryApi
 from airqo_etl_utils.constants import Tenant, ColumnDataType, Frequency
 from airqo_etl_utils.date import date_to_str
+from typing import Any, Dict, List
+from .config import configuration
+
+logger = logging.getLogger(__name__)
 
 
 class DataValidationUtils:
+    VALID_SENSOR_RANGES = {
+        "pm2_5": (1, 1000),
+        "pm10": (1, 1000),
+        "latitude": (-90, 90),
+        "longitude": (-180, 180),
+        "battery": (2.7, 5),
+        "no2": (0, 2049),
+        "altitude": (0, float("inf")),
+        "hdop": (0, float("inf")),
+        "satellites": (1, 50),
+        "temperature": (0, 45),
+        "humidity": (0, 99),
+        "pressure": (30, 110),
+        "tvoc": (0, 10),
+        "co2": (400, 3000),
+        "hcho": (0, float("inf")),
+        "intaketemperature": (0, 45),
+        "intakehumidity": (0, 99),
+    }
+
     @staticmethod
     def format_data_types(
         data: pd.DataFrame,
@@ -16,121 +40,137 @@ class DataValidationUtils:
         integers: list = None,
         timestamps: list = None,
     ) -> pd.DataFrame:
-        floats = [] if floats is None else floats
-        integers = [] if integers is None else integers
-        timestamps = [] if timestamps is None else timestamps
+        """
+        Formats specified columns in a DataFrame to desired data types: float, integer, and datetime.
 
-        data[floats] = data[floats].apply(pd.to_numeric, errors="coerce")
-        data[timestamps] = data[timestamps].apply(pd.to_datetime, errors="coerce")
+        Args:
+            data(pd.DataFrame): The input DataFrame containing the data to be formatted.
+            floats(list, optional): List of column names to be converted to floats. Defaults to an empty list.
+            integers(list, optional): List of column names to be converted to integers. Defaults to an empty list.
+            timestamps(list, optional): List of column names to be converted to datetime. Defaults to an empty list.
 
-        # formatting integers
+        Returns:
+            pd.DataFrame: A DataFrame with the specified columns formatted to their respective data types.
+
+        Notes:
+        ------
+        - Columns specified in `floats` are converted to floats. Rows with invalid values are coerced to NaN.
+        - Columns specified in `integers` are stripped of non-numeric characters, and invalid values are replaced with -1.
+        - Columns specified in `timestamps` are converted to datetime. Invalid timestamps are coerced to NaT.
+        - The function modifies the input DataFrame in place and returns it.
+        """
+
+        floats = floats or []
+        integers = integers or []
+        timestamps = timestamps or []
+
+        if floats:
+            data[floats] = data[floats].apply(pd.to_numeric, errors="coerce")
+
+        if timestamps:
+            for col in timestamps:
+                data[col] = (
+                    data[col]
+                    .astype(str)
+                    .str.replace(r"[^\w\s\.\-+:]", "", regex=True)
+                    .str.replace(r"(?<!\.\d{3})Z$", ".000Z", regex=True)
+                )  # Negative lookbehind to add missing milliseconds if needed
+                data[col] = pd.to_datetime(data[col], errors="coerce", utc=True)
+
         if integers:
             for col in integers:
-                if data[col].dtype != "str":
-                    data[col] = data[col].astype(str)
-                data[col] = data[col].str.replace("[^\d]", "", regex=True)
-                data[col] = data[col].str.strip()
-                data[col] = data[col].replace("", -1)
-                data[col] = data[col].astype(np.int64)
+                data[col] = (
+                    data[col]
+                    .fillna("")  # Replace NaN with empty strings
+                    .astype(str)  # Convert to string
+                    .str.strip()  # Remove leading/trailing whitespace
+                    .replace("", np.nan)  # Replace empty strings with NaN for clarity
+                    .apply(
+                        lambda x: pd.to_numeric(x, errors="coerce")
+                    )  # Convert to numeric
+                    .fillna(-1)  # Replace NaN with -1 for invalid/missing values
+                    .astype(np.int64)  # Convert to integer type
+                )
 
         return data
 
     @staticmethod
-    def get_valid_value(value, name):
-        if (name == "pm2_5" or name == "pm10") and (value < 1 or value > 1000):
-            return None
-        elif name == "latitude" and (value < -90 or value > 90):
-            return None
-        elif name == "longitude" and (value < -180 or value > 180):
-            return None
-        elif name == "battery" and (value < 2.7 or value > 5):
-            return None
-        elif name == "no2" and (value < 0 or value > 2049):
-            return None
-        elif (name == "altitude" or name == "hdop") and value <= 0:
-            return None
-        elif name == "satellites" and (value <= 0 or value > 50):
-            return None
-        elif (name == "temperature") and (value <= 0 or value > 45):
-            return None
-        elif (name == "humidity") and (value <= 0 or value > 99):
-            return None
-        elif name == "pressure" and (value < 30 or value > 110):
-            return None
-        else:
-            pass
+    def get_valid_value(column_name: str, row_value: Any) -> Any:
+        """
+        Checks if column values fall with in specific ranges.
 
-        return value
+        Args:
+            column_name(str): Name of column to validate
+            row_value(Any): Actual value to validate against valid sensor ranges.
+
+        Return:
+            None if value does not fall with in the valid range otherwise returns the value passed.
+        """
+        if column_name in DataValidationUtils.VALID_SENSOR_RANGES:
+            min_val, max_val = DataValidationUtils.VALID_SENSOR_RANGES[column_name]
+            if not (min_val <= row_value <= max_val):
+                return None
+
+        return row_value
 
     @staticmethod
     def remove_outliers(data: pd.DataFrame) -> pd.DataFrame:
+        """
+        Cleans and validates data in a DataFrame by formatting columns to their proper types and removing or correcting outliers based on predefined validation rules.
+
+        Args:
+            data (pd.DataFrame): Input DataFrame containing the raw data to clean.
+
+        Returns:
+            pd.DataFrame: A DataFrame with outliers removed or corrected and data formatted to their respective types (float, integer, timestamp).
+        """
         big_query_api = BigQueryApi()
-        float_columns = set(
-            big_query_api.get_columns(table="all", column_type=ColumnDataType.FLOAT)
-        )
-        integer_columns = set(
-            big_query_api.get_columns(table="all", column_type=ColumnDataType.INTEGER)
-        )
-        timestamp_columns = set(
-            big_query_api.get_columns(table="all", column_type=ColumnDataType.TIMESTAMP)
-        )
+        column_types = {
+            ColumnDataType.FLOAT: big_query_api.get_columns(
+                table="all", column_type=[ColumnDataType.FLOAT]
+            ),
+            ColumnDataType.INTEGER: big_query_api.get_columns(
+                table="all", column_type=[ColumnDataType.INTEGER]
+            ),
+            ColumnDataType.TIMESTAMP: big_query_api.get_columns(
+                table="all", column_type=[ColumnDataType.TIMESTAMP]
+            ),
+        }
 
-        float_columns = list(float_columns & set(data.columns))
-        integer_columns = list(integer_columns & set(data.columns))
-        timestamp_columns = list(timestamp_columns & set(data.columns))
-
+        filtered_columns = {
+            dtype: list(set(columns) & set(data.columns))
+            for dtype, columns in column_types.items()
+        }
         data = DataValidationUtils.format_data_types(
             data=data,
-            floats=float_columns,
-            integers=integer_columns,
-            timestamps=timestamp_columns,
+            floats=filtered_columns[ColumnDataType.FLOAT],
+            integers=filtered_columns[ColumnDataType.INTEGER],
+            timestamps=filtered_columns[ColumnDataType.TIMESTAMP],
         )
 
-        columns = []
-        columns.extend(float_columns)
-        columns.extend(integer_columns)
-        columns.extend(timestamp_columns)
-
-        for col in columns:
-            name = col
-            if name in [
-                "pm2_5",
-                "s1_pm2_5",
-                "s2_pm2_5",
-                "pm2_5_pi",
-                "pm2_5_raw_value",
-                "pm2_5_calibrated_value",
-            ]:
-                name = "pm2_5"
-            elif name in [
-                "pm10",
-                "s1_pm10",
-                "s2_pm10",
-                "pm10_pi",
-                "pm10_raw_value",
-                "pm10_calibrated_value",
-            ]:
-                name = "pm10"
-            elif name in ["device_humidity", "humidity"]:
-                name = "humidity"
-            elif col in ["device_temperature", "temperature"]:
-                name = "temperature"
-            elif name in ["no2", "no2_raw_value", "no2_calibrated_value"]:
-                name = "no2"
-            elif name in ["pm1", "pm1_raw_value", "pm1_pi"]:
-                name = "pm1"
-
-            data.loc[:, col] = data[col].apply(
-                lambda x: DataValidationUtils.get_valid_value(x, name)
-            )
-
+        validated_columns = list(chain.from_iterable(filtered_columns.values()))
+        for col in validated_columns:
+            mapped_name = configuration.AIRQO_DATA_COLUMN_NAME_MAPPING.get(col, None)
+            if "network" in data.columns:
+                is_airqo_network = data["network"] == "airqo"
+                data.loc[is_airqo_network, col] = data.loc[is_airqo_network, col].apply(
+                    lambda x: DataValidationUtils.get_valid_value(
+                        column_name=mapped_name, row_value=x
+                    )
+                )
+            else:
+                data[col] = data[col].apply(
+                    lambda x: DataValidationUtils.get_valid_value(
+                        column_name=mapped_name, row_value=x
+                    )
+                )
         return data
 
     @staticmethod
     def fill_missing_columns(data: pd.DataFrame, cols: list) -> pd.DataFrame:
         for col in cols:
             if col not in list(data.columns):
-                print(f"{col} missing in dataframe")
+                logger.warning(f"{col} missing in dataframe")
                 data.loc[:, col] = None
 
         return data
@@ -145,14 +185,59 @@ class DataValidationUtils:
         return dataframe[columns]
 
     @staticmethod
-    def process_for_message_broker(
-        data: pd.DataFrame, tenant: Tenant, frequency: Frequency = Frequency.HOURLY
+    def process_data_for_message_broker(
+        data: pd.DataFrame,
+        caller: str,
+        topic: str = None,
+        frequency: Frequency = Frequency.HOURLY,
     ) -> pd.DataFrame:
-        data.loc[:, "frequency"] = str(frequency)
+        """
+        Processes the input DataFrame for message broker consumption based on the specified tenant, frequency, and topic.
+
+        Args:
+            data (pd.DataFrame): The input data to be processed.
+            tenant (Tenant): The tenant filter for the data, defaults to Tenant.ALL.
+            topic (str): The Kafka topic being processed, defaults to None.
+            caller (str): The group ID or identifier for devices processing, defaults to None.
+            frequency (Frequency): The data frequency (e.g., hourly), defaults to Frequency.HOURLY.
+
+        Returns:
+            pd.DataFrame: The processed DataFrame ready for message broker consumption.
+        """
+        from .airqo_utils import AirQoDataUtils
+
+        data["frequency"] = str(frequency)
         data["timestamp"] = pd.to_datetime(data["timestamp"])
-        data["timestamp"] = data["timestamp"].apply(date_to_str)
-        if tenant != Tenant.ALL:
-            data.loc[:, "tenant"] = str(tenant)
+        data["timestamp"] = data["timestamp"].dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        data.rename(columns={"device_id": "device_name"}, inplace=True)
+
+        devices = AirQoDataUtils.get_devices(group_id=caller)
+        try:
+            devices = devices[
+                [
+                    "device_name",
+                    "site_id",
+                    "device_latitude",
+                    "device_longitude",
+                    "network",
+                ]
+            ]
+
+            data = pd.merge(
+                left=data,
+                right=devices,
+                on=["device_name", "site_id", "network"],
+                how="left",
+            )
+        except KeyError as e:
+            logger.exception(
+                f"KeyError: The key(s) '{e.args}' are not available in the returned devices data."
+            )
+            return None
+        except Exception as e:
+            logger.exception(f"An error occured: {e}")
+            return None
         return data
 
     @staticmethod
@@ -164,15 +249,43 @@ class DataValidationUtils:
 
     @staticmethod
     def process_data_for_api(data: pd.DataFrame) -> list:
+        """
+        Processes a pandas DataFrame to structure data into a format suitable for API consumption.
+
+        The function:
+        1. Ensures all required columns are present in the DataFrame by filling missing ones.
+        2. Constructs a list of dictionaries for each row, with nested data structures for location,
+        pollutant values, and other metadata.
+
+        Args:
+            data (pd.DataFrame): The input DataFrame containing raw device data.
+
+        Returns:
+            list: A list of dictionaries, each representing a structured data record ready for the API.
+
+        Raises:
+            Exception: Logs any errors encountered during row processing but does not halt execution.
+        """
         restructured_data = []
 
-        data["timestamp"] = data["timestamp"].apply(pd.to_datetime)
-        data["timestamp"] = data["timestamp"].apply(date_to_str)
+        data["timestamp"] = pd.to_datetime(data["timestamp"]).apply(date_to_str)
 
         bigquery_api = BigQueryApi()
         cols = bigquery_api.get_columns(bigquery_api.hourly_measurements_table)
         cols.append("battery")
         data = DataValidationUtils.fill_missing_columns(data, cols=cols)
+
+        # TODO Use DataValidation.format_data_types() to convert cleanup multipe columns.
+        data["device_number"] = (
+            data["device_number"]
+            .fillna("")
+            .astype(str)
+            .str.strip()
+            .replace("", np.nan)
+            .apply(lambda x: pd.to_numeric(x, errors="coerce"))
+            .fillna(-1)
+            .astype(np.int64)
+        )
 
         for _, row in data.iterrows():
             try:
@@ -181,8 +294,7 @@ class DataValidationUtils:
                     "device_id": row["mongo_id"],
                     "site_id": row["site_id"],
                     "device_number": row["device_number"],
-                    "tenant": str(Tenant.AIRQO),
-                    "network": row["tenant"],
+                    "network": row["network"],
                     "location": {
                         "latitude": {"value": row["latitude"]},
                         "longitude": {"value": row["longitude"]},
@@ -231,7 +343,49 @@ class DataValidationUtils:
                 restructured_data.append(row_data)
 
             except Exception as ex:
-                traceback.print_exc()
-                print(ex)
+                logger.exception(f"Error ocurred: {ex}")
 
         return restructured_data
+
+    def transform_devices(devices: List[Dict[str, Any]], taskinstance) -> pd.DataFrame:
+        """
+        Transforms and processes the devices DataFrame. If the checksum of the
+        devices data has not changed since the last execution, it returns an empty DataFrame.
+        Otherwise, it updates the checksum in XCom and returns the transformed DataFrame.
+
+        Args:
+            devices (pd.DataFrame): A Pandas DataFrame containing the devices data.
+            task_instance: The Airflow task instance used to pull and push XCom values.
+
+        Returns:
+            pd.DataFrame: Transformed DataFrame if the devices data has changed since
+                        the last execution; otherwise, an empty DataFrame.
+        """
+        import hashlib
+
+        devices = pd.DataFrame(devices)
+        devices.rename(
+            columns={
+                "device_id": "device_name",
+                "_id": "device_id",
+                "latitude": "device_latitude",
+                "longitude": "device_longitude",
+            },
+            inplace=True,
+        )
+
+        # Convert devices DataFrame to JSON for consistency since JSON stores metadata and compute checksum
+        if not devices.empty:
+            devices_json = devices.to_json(orient="records", date_format="iso")
+            api_devices_checksum = hashlib.md5(devices_json.encode()).hexdigest()
+
+            previous_checksum = taskinstance.xcom_pull(key="devices_checksum")
+
+            if previous_checksum == api_devices_checksum:
+                return pd.DataFrame()
+
+            taskinstance.xcom_push(key="devices_checksum", value=api_devices_checksum)
+        else:
+            logger.warning("No devices returned.")
+
+        return devices

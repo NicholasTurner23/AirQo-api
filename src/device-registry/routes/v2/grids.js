@@ -195,14 +195,20 @@ router.post(
         .withMessage(
           "admin_level values include but not limited to: province, state, village, county, etc. Update your GLOBAL configs"
         ),
-
-      body("network")
-        .trim()
-        .exists()
-        .withMessage("the network is is missing in your request")
+      body("groups")
+        .optional()
+        .custom((value) => {
+          return Array.isArray(value);
+        })
+        .withMessage("the groups should be an array")
         .bail()
         .notEmpty()
-        .withMessage("the network should not be empty")
+        .withMessage("the groups should not be empty"),
+      body("network")
+        .trim()
+        .optional()
+        .notEmpty()
+        .withMessage("the network should not be empty IF provided")
         .bail()
         .toLowerCase()
         .custom(validateNetwork)
@@ -374,6 +380,15 @@ router.put(
         .optional()
         .notEmpty()
         .withMessage("the description should not be empty if provided"),
+      body("groups")
+        .optional()
+        .custom((value) => {
+          return Array.isArray(value);
+        })
+        .withMessage("the groups should be an array")
+        .bail()
+        .notEmpty()
+        .withMessage("the groups should not be empty"),
       body("network")
         .optional()
         .notEmpty()

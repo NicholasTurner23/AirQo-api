@@ -58,7 +58,6 @@ class TestAirQoDataUtils(unittest.TestCase):
 
     @patch("airqo_etl_utils.airqo_utils.BigQueryApi")
     def test_extract_aggregated_raw_data(self, MockBigQueryApi):
-
         mock_bigquery_api = MockBigQueryApi.return_value
 
         input_data = {

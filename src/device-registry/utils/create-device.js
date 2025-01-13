@@ -428,10 +428,10 @@ const createDevice = {
   },
   list: async (request, next) => {
     try {
-      const { tenant, category, limit, skip } = request.query;
+      const { tenant, path, limit, skip } = request.query;
       const filter = generateFilter.devices(request, next);
-      if (!isEmpty(category)) {
-        filter.category = category;
+      if (!isEmpty(path)) {
+        filter.path = path;
       }
       const responseFromListDevice = await DeviceModel(tenant).list(
         {
@@ -534,6 +534,8 @@ const createDevice = {
       let context = {};
       if (category === "bam") {
         context = constants.BAM_THINGSPEAK_FIELD_DESCRIPTIONS;
+      } else if (category === "gas") {
+        context = constants.THINGSPEAK_GAS_FIELD_DESCRIPTIONS;
       } else {
         context = constants.THINGSPEAK_FIELD_DESCRIPTIONS;
       }
@@ -699,6 +701,91 @@ const createDevice = {
       return responseFromModifyDevice;
     } catch (error) {
       logger.error(`🐛🐛 Internal Server Error ${error.message}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+    }
+  },
+  updateManyDevicesOnPlatform: async (request, next) => {
+    try {
+      const { tenant } = request.query;
+      const { deviceIds, updateData } = request.body;
+
+      // Find existing devices
+      const existingDevices = await DeviceModel(tenant)
+        .find({
+          _id: { $in: deviceIds },
+        })
+        .select("_id");
+
+      // Create sets for comparison
+      const existingDeviceIds = new Set(
+        existingDevices.map((device) => device._id.toString())
+      );
+      const providedDeviceIds = new Set(deviceIds.map((id) => id.toString()));
+
+      // Identify non-existent device IDs
+      const nonExistentDeviceIds = deviceIds.filter(
+        (id) => !existingDeviceIds.has(id.toString())
+      );
+
+      // If there are non-existent devices, prepare a detailed error
+      if (nonExistentDeviceIds.length > 0) {
+        return next(
+          new HttpError("Bad Request", httpStatus.BAD_REQUEST, {
+            message: "Some provided device IDs do not exist",
+            nonExistentDeviceIds: nonExistentDeviceIds,
+            existingDeviceIds: Array.from(existingDeviceIds),
+            totalProvidedDeviceIds: deviceIds.length,
+            existingDeviceCount: existingDevices.length,
+          })
+        );
+      }
+
+      // Prepare filter
+      const filter = {
+        _id: { $in: deviceIds },
+      };
+
+      // Additional filtering from generateFilter if needed
+      const additionalFilter = generateFilter.devices(request, next);
+      Object.assign(filter, additionalFilter);
+
+      // Optimize options for bulk update
+      const opts = {
+        new: true,
+        multi: true,
+        runValidators: true,
+        context: "query",
+      };
+
+      // Perform bulk update
+      const responseFromBulkModifyDevices = await DeviceModel(
+        tenant
+      ).bulkModify(
+        {
+          filter,
+          update: updateData,
+          opts,
+        },
+        next
+      );
+
+      // Attach additional metadata to the response
+      return {
+        ...responseFromBulkModifyDevices,
+        metadata: {
+          totalDevicesUpdated: responseFromBulkModifyDevices.data.modifiedCount,
+          requestedDeviceIds: deviceIds,
+          existingDeviceIds: Array.from(existingDeviceIds),
+        },
+      };
+    } catch (error) {
+      logger.error(`🐛🐛 Bulk Update Error: ${error.message}`);
       next(
         new HttpError(
           "Internal Server Error",

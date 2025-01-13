@@ -29,7 +29,17 @@ const logSchema = new mongoose.Schema(
       default: {},
     },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    indexes: [
+      {
+        timestamp: 1,
+        "meta.email": 1,
+        "meta.service": 1,
+        "meta.endpoint": 1,
+      },
+    ],
+  }
 );
 
 logSchema.pre("save", function (next) {
@@ -200,11 +210,13 @@ logSchema.methods = {
 };
 
 const LogModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     const logs = mongoose.model("logs");
     return logs;
   } catch (error) {
-    const logs = getModelByTenant(tenant, "log", logSchema);
+    const logs = getModelByTenant(dbTenant, "log", logSchema);
     return logs;
   }
 };

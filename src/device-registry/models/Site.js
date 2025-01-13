@@ -12,12 +12,44 @@ const { getModelByTenant } = require("@config/database");
 const log4js = require("log4js");
 const logger = log4js.getLogger(`${constants.ENVIRONMENT} -- site-model`);
 
+function sanitizeObject(obj, invalidKeys) {
+  invalidKeys.forEach((key) => {
+    if (Object.hasOwn(obj, key)) {
+      delete obj[key];
+    }
+  });
+  return obj;
+}
+
+const categorySchema = new Schema(
+  {
+    area_name: { type: String },
+    category: { type: String },
+    highway: { type: String },
+    landuse: { type: String },
+    latitude: { type: Number },
+    longitude: { type: Number },
+    natural: { type: String },
+    search_radius: { type: Number },
+    waterway: { type: String },
+    tags: [
+      {
+        type: String,
+        trim: true,
+      },
+    ],
+  },
+  {
+    _id: false,
+  }
+);
+
 const siteSchema = new Schema(
   {
+    site_category: { type: categorySchema },
     name: {
       type: String,
       trim: true,
-      unique: true,
       required: [true, "name is required!"],
     },
     visibility: {
@@ -52,8 +84,8 @@ const siteSchema = new Schema(
       trim: true,
       required: [true, "network is required!"],
     },
-    group: {
-      type: String,
+    groups: {
+      type: [String],
       trim: true,
     },
     data_provider: {
@@ -69,6 +101,7 @@ const siteSchema = new Schema(
       trim: true,
       unique: true,
       required: [true, "generated name is required!"],
+      immutable: true,
     },
     airqloud_id: {
       type: ObjectId,
@@ -89,6 +122,7 @@ const siteSchema = new Schema(
       trim: true,
       unique: true,
       required: [true, "lat_long is required!"],
+      immutable: true,
     },
     description: {
       type: String,
@@ -104,6 +138,7 @@ const siteSchema = new Schema(
     latitude: {
       type: Number,
       required: [true, "latitude is required!"],
+      immutable: true,
     },
     approximate_latitude: {
       type: Number,
@@ -112,6 +147,7 @@ const siteSchema = new Schema(
     longitude: {
       type: Number,
       required: [true, "longitude is required!"],
+      immutable: true,
     },
     approximate_longitude: {
       type: Number,
@@ -254,6 +290,12 @@ const siteSchema = new Schema(
       type: String,
       trim: true,
     },
+    lastActive: { type: Date },
+    isOnline: {
+      type: Boolean,
+      trim: true,
+      default: false,
+    },
     count: { type: Number },
     country: {
       type: String,
@@ -331,60 +373,140 @@ const siteSchema = new Schema(
   }
 );
 
-siteSchema.post("save", async function(doc) {});
-
-siteSchema.pre("save", function(next) {
-  if (this.isModified("latitude")) {
-    delete this.latitude;
-  }
-  if (this.isModified("longitude")) {
-    delete this.longitude;
-  }
-  if (this.isModified("_id")) {
-    delete this._id;
-  }
-  if (this.isModified("generated_name")) {
-    delete this.generated_name;
-  }
-
-  this.site_codes = [this._id, this.name, this.generated_name, this.lat_long];
-  if (this.search_name) {
-    this.site_codes.push(this.search_name);
-  }
-  if (this.location_name) {
-    this.site_codes.push(this.location_name);
-  }
-  if (this.formatted_name) {
-    this.site_codes.push(this.formatted_name);
-  }
-
-  // Check for duplicate values in the grids array
-  const duplicateValues = this.grids.filter(
+const checkDuplicates = (arr, fieldName) => {
+  const duplicateValues = arr.filter(
     (value, index, self) => self.indexOf(value) !== index
   );
+
   if (duplicateValues.length > 0) {
-    const error = new Error("Duplicate values found in grids array.");
-    return next(error);
+    return new HttpError(
+      `Duplicate values found in ${fieldName} array.`,
+      httpStatus.BAD_REQUEST
+    );
   }
+  return null;
+};
 
-  return next();
-});
+siteSchema.pre(
+  ["updateOne", "findOneAndUpdate", "updateMany", "update", "save"],
+  function(next) {
+    if (this.getUpdate) {
+      const updates = this.getUpdate();
+      if (updates) {
+        // Handle data_provider update based on groups
+        const hasExplicitDataProvider =
+          updates.data_provider || (updates.$set && updates.$set.data_provider);
 
-siteSchema.pre("update", function(next) {
-  if (this.isModified("latitude")) {
-    delete this.latitude;
+        // Check for groups in different possible update operations
+        const groupsUpdate =
+          updates.groups ||
+          (updates.$set && updates.$set.groups) ||
+          (updates.$addToSet &&
+            updates.$addToSet.groups &&
+            updates.$addToSet.groups.$each) ||
+          (updates.$push && updates.$push.groups && updates.$push.groups.$each);
+
+        // Update data_provider if groups are being updated and no explicit data_provider is provided
+        if (groupsUpdate && !hasExplicitDataProvider) {
+          const groupsArray = Array.isArray(groupsUpdate)
+            ? groupsUpdate
+            : groupsUpdate.$each
+            ? groupsUpdate.$each
+            : [groupsUpdate];
+
+          if (groupsArray.length > 0) {
+            updates.data_provider = groupsArray[0]; // Direct assignment instead of using $set
+          }
+        }
+        // Prevent modification of restricted fields
+        const restrictedFields = [
+          "latitude",
+          "longitude",
+          "_id",
+          "generated_name",
+          "lat_long",
+        ];
+        restrictedFields.forEach((field) => {
+          // Remove from top-level updates
+          if (updates[field]) delete updates[field];
+
+          // Remove from $set
+          if (updates.$set && updates.$set[field]) {
+            if (field === "latitude" || field === "longitude") {
+              return next(
+                new HttpError(
+                  "Cannot modify latitude or longitude after creation",
+                  httpStatus.BAD_REQUEST,
+                  {
+                    message:
+                      "Cannot modify latitude or longitude after creation",
+                  }
+                )
+              );
+            }
+            delete updates.$set[field];
+          }
+
+          // Remove from $push
+          if (updates.$push && updates.$push[field])
+            delete updates.$push[field];
+        });
+
+        // Handle array fields using $addToSet
+        const arrayFieldsToAddToSet = [
+          "site_tags",
+          "images",
+          "land_use",
+          "site_codes",
+          "airqlouds",
+          "groups",
+          "grids",
+        ];
+        arrayFieldsToAddToSet.forEach((field) => {
+          if (updates[field]) {
+            updates.$addToSet = updates.$addToSet || {};
+            updates.$addToSet[field] = { $each: updates[field] };
+            delete updates[field];
+          }
+        });
+      }
+    }
+
+    if (this.isNew) {
+      // Prepare site_codes array
+      this.site_codes = [
+        this._id,
+        this.name,
+        this.generated_name,
+        this.lat_long,
+      ];
+
+      // Optionally add additional site codes
+      const optionalSiteCodes = [
+        "search_name",
+        "location_name",
+        "formatted_name",
+      ];
+      optionalSiteCodes.forEach((field) => {
+        if (this[field]) this.site_codes.push(this[field]);
+      });
+
+      // Check for duplicates in grids
+      const gridsDuplicateError = checkDuplicates(this.grids, "grids");
+      if (gridsDuplicateError) {
+        return next(gridsDuplicateError);
+      }
+
+      // Check for duplicates in groups
+      const groupsDuplicateError = checkDuplicates(this.groups, "groups");
+      if (groupsDuplicateError) {
+        return next(groupsDuplicateError);
+      }
+    }
+
+    next();
   }
-  if (this.isModified("longitude")) {
-    delete this.longitude;
-  }
-  if (this.isModified("_id")) {
-    delete this._id;
-  }
-  if (this.isModified("generated_name")) {
-    delete this.generated_name;
-  }
-  return next();
-});
+);
 
 siteSchema.index({ lat_long: 1 }, { unique: true });
 siteSchema.index({ generated_name: 1 }, { unique: true });
@@ -399,11 +521,12 @@ siteSchema.methods = {
       _id: this._id,
       grids: this.grids,
       name: this.name,
+      site_category: this.site_category,
       visibility: this.visibility,
       generated_name: this.generated_name,
       search_name: this.search_name,
       network: this.network,
-      group: this.group,
+      groups: this.groups,
       data_provider: this.data_provider,
       location_name: this.location_name,
       formatted_name: this.formatted_name,
@@ -429,6 +552,8 @@ siteSchema.methods = {
       images: this.images,
       share_links: this.share_links,
       city: this.city,
+      lastActive: this.lastActive,
+      isOnline: this.isOnline,
       street: this.street,
       county: this.county,
       altitude: this.altitude,
@@ -485,6 +610,7 @@ siteSchema.statics = {
         delete data.airqlouds;
         delete data.site_tags;
         delete data.nearest_tahmo_station;
+        delete data.weather_stations;
         return {
           success: true,
           data,
@@ -522,12 +648,13 @@ siteSchema.statics = {
     try {
       const inclusionProjection = constants.SITES_INCLUSION_PROJECTION;
       const exclusionProjection = constants.SITES_EXCLUSION_PROJECTION(
-        filter.category ? filter.category : "none"
+        filter.path ? filter.path : "none"
       );
 
-      if (!isEmpty(filter.category)) {
-        delete filter.category;
+      if (!isEmpty(filter.path)) {
+        delete filter.path;
       }
+
       if (!isEmpty(filter.dashboard)) {
         delete filter.dashboard;
       }
@@ -599,12 +726,13 @@ siteSchema.statics = {
     try {
       const inclusionProjection = constants.SITES_INCLUSION_PROJECTION;
       const exclusionProjection = constants.SITES_EXCLUSION_PROJECTION(
-        filter.category ? filter.category : "none"
+        filter.path ? filter.path : "none"
       );
 
-      if (!isEmpty(filter.category)) {
-        delete filter.category;
+      if (!isEmpty(filter.path)) {
+        delete filter.path;
       }
+
       if (!isEmpty(filter.dashboard)) {
         delete filter.dashboard;
       }
@@ -677,63 +805,10 @@ siteSchema.statics = {
   async modify({ filter = {}, update = {} } = {}, next) {
     try {
       let options = { new: true, useFindAndModify: false, upsert: false };
-      let modifiedUpdateBody = update;
-      modifiedUpdateBody["$addToSet"] = {};
-      if (modifiedUpdateBody._id) {
-        delete modifiedUpdateBody._id;
-      }
-      if (modifiedUpdateBody.latitude) {
-        delete modifiedUpdateBody.latitude;
-      }
-      if (modifiedUpdateBody.longitude) {
-        delete modifiedUpdateBody.longitude;
-      }
-      if (modifiedUpdateBody.generated_name) {
-        delete modifiedUpdateBody.generated_name;
-      }
-      if (modifiedUpdateBody.lat_long) {
-        logText("yes, the lat_long does exist here");
-        delete modifiedUpdateBody.lat_long;
-      }
 
-      if (modifiedUpdateBody.site_tags) {
-        modifiedUpdateBody["$addToSet"]["site_tags"] = {};
-        modifiedUpdateBody["$addToSet"]["site_tags"]["$each"] =
-          modifiedUpdateBody.site_tags;
-        delete modifiedUpdateBody["site_tags"];
-      }
-
-      if (modifiedUpdateBody.images) {
-        modifiedUpdateBody["$addToSet"]["images"] = {};
-        modifiedUpdateBody["$addToSet"]["images"]["$each"] =
-          modifiedUpdateBody.images;
-        delete modifiedUpdateBody["images"];
-      }
-
-      if (modifiedUpdateBody.land_use) {
-        modifiedUpdateBody["$addToSet"]["land_use"] = {};
-        modifiedUpdateBody["$addToSet"]["land_use"]["$each"] =
-          modifiedUpdateBody.land_use;
-        delete modifiedUpdateBody["land_use"];
-      }
-
-      if (modifiedUpdateBody.site_codes) {
-        modifiedUpdateBody["$addToSet"]["site_codes"] = {};
-        modifiedUpdateBody["$addToSet"]["site_codes"]["$each"] =
-          modifiedUpdateBody.site_codes;
-        delete modifiedUpdateBody["site_codes"];
-      }
-
-      if (modifiedUpdateBody.airqlouds) {
-        modifiedUpdateBody["$addToSet"]["airqlouds"] = {};
-        modifiedUpdateBody["$addToSet"]["airqlouds"]["$each"] =
-          modifiedUpdateBody.airqlouds;
-        delete modifiedUpdateBody["airqlouds"];
-      }
-      logObject("modifiedUpdateBody", modifiedUpdateBody);
       let updatedSite = await this.findOneAndUpdate(
         filter,
-        modifiedUpdateBody,
+        update,
         options
       ).exec();
 
@@ -744,7 +819,7 @@ siteSchema.statics = {
           data: updatedSite._doc,
           status: httpStatus.OK,
         };
-      } else if (isEmpty(updatedSite)) {
+      } else {
         next(
           new HttpError("Bad Request Error", httpStatus.BAD_REQUEST, {
             message: "site does not exist, please crosscheck",
@@ -754,6 +829,61 @@ siteSchema.statics = {
     } catch (error) {
       const stingifiedMessage = JSON.stringify(error ? error : "");
       logger.error(`🐛🐛 Internal Server Error -- ${stingifiedMessage}`);
+      next(
+        new HttpError(
+          "Internal Server Error",
+          httpStatus.INTERNAL_SERVER_ERROR,
+          { message: error.message }
+        )
+      );
+    }
+  },
+  async bulkModify({ filter = {}, update = {}, opts = {} }, next) {
+    try {
+      const invalidKeys = [
+        "_id",
+        "longitude",
+        "latitude",
+        "lat_long",
+        "generated_name",
+      ];
+      const sanitizedUpdate = sanitizeObject(update, invalidKeys);
+
+      // Perform bulk update with additional options
+      const bulkUpdateResult = await this.updateMany(
+        filter,
+        { $set: sanitizedUpdate },
+        {
+          new: true,
+          runValidators: true,
+          ...opts,
+        }
+      );
+
+      if (bulkUpdateResult.nModified > 0) {
+        return {
+          success: true,
+          message: `Successfully modified ${bulkUpdateResult.nModified} sites`,
+          data: {
+            modifiedCount: bulkUpdateResult.nModified,
+            matchedCount: bulkUpdateResult.n,
+          },
+          status: httpStatus.OK,
+        };
+      } else {
+        return {
+          success: true,
+          message: "No sites were updated",
+          data: {
+            modifiedCount: 0,
+            matchedCount: bulkUpdateResult.n,
+          },
+          status: httpStatus.OK,
+        };
+      }
+    } catch (error) {
+      const stringifiedMessage = JSON.stringify(error ? error : "");
+      logger.error(`🐛🐛 Bulk Modify Sites Error -- ${stringifiedMessage}`);
       next(
         new HttpError(
           "Internal Server Error",
@@ -805,11 +935,13 @@ siteSchema.statics = {
 };
 
 const SiteModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     let sites = mongoose.model("sites");
     return sites;
   } catch (error) {
-    let sites = getModelByTenant(tenant, "site", siteSchema);
+    let sites = getModelByTenant(dbTenant, "site", siteSchema);
     return sites;
   }
 };

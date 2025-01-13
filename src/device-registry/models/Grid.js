@@ -43,8 +43,8 @@ const gridSchema = new Schema(
       trim: true,
       required: [true, "the network is required!"],
     },
-    group: {
-      type: String,
+    groups: {
+      type: [String],
       trim: true,
     },
     geoHash: {
@@ -121,7 +121,7 @@ gridSchema.methods.toJSON = function() {
     name,
     long_name,
     network,
-    group,
+    groups,
     visibility,
     description,
     grid_tags,
@@ -139,7 +139,7 @@ gridSchema.methods.toJSON = function() {
     description,
     grid_tags,
     network,
-    group,
+    groups,
     admin_level,
     grid_codes,
     centers,
@@ -227,10 +227,10 @@ gridSchema.statics.list = async function(
     logText("we are inside model's list....");
     const inclusionProjection = constants.GRIDS_INCLUSION_PROJECTION;
     const exclusionProjection = constants.GRIDS_EXCLUSION_PROJECTION(
-      filter.category ? filter.category : "none"
+      filter.path ? filter.path : "none"
     );
-    if (!isEmpty(filter.category)) {
-      delete filter.category;
+    if (!isEmpty(filter.path)) {
+      delete filter.path;
     }
     if (!isEmpty(filter.dashboard)) {
       delete filter.dashboard;
@@ -238,6 +238,8 @@ gridSchema.statics.list = async function(
     if (!isEmpty(filter.summary)) {
       delete filter.summary;
     }
+    logObject("filter", filter);
+    logObject("exclusionProjection", exclusionProjection);
     const pipeline = this.aggregate()
       .match(filter)
       .lookup({
@@ -369,11 +371,13 @@ gridSchema.statics.remove = async function({ filter = {} } = {}, next) {
 };
 
 const GridModel = (tenant) => {
+  const defaultTenant = constants.DEFAULT_TENANT || "airqo";
+  const dbTenant = isEmpty(tenant) ? defaultTenant : tenant;
   try {
     const grids = mongoose.model("grids");
     return grids;
   } catch (error) {
-    const grids = getModelByTenant(tenant, "grid", gridSchema);
+    const grids = getModelByTenant(dbTenant, "grid", gridSchema);
     return grids;
   }
 };

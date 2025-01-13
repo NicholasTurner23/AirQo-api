@@ -27,12 +27,38 @@ function generateDateFormatWithoutHrs(ISODate) {
 
 const mappings = {
   AQI_INDEX: {
-    good: [0, 12],
-    moderate: [12.1, 35.4],
-    u4sg: [35.5, 55.4],
-    unhealthy: [55.5, 150.4],
-    very_unhealthy: [150.5, 250.4],
-    hazardous: [250.5, 500],
+    good: { min: 0, max: 9.0 },
+    moderate: { min: 9.1, max: 35.4 },
+    u4sg: { min: 35.5, max: 55.4 },
+    unhealthy: { min: 55.5, max: 125.4 },
+    very_unhealthy: { min: 125.5, max: 225.4 },
+    hazardous: { min: 225.5, max: null },
+  },
+  PREDEFINED_FILTER_VALUES: {
+    NETWORKS: ["metone", "usembassy"],
+    COMBINATIONS: {
+      NETWORK_PAIRS: [
+        ["metone", "usembassy", "us_embassy", "us-embassy"],
+        ["kcca", "clarity"],
+        ["urbanbetter", "airbeam", "urban_better"],
+      ],
+      GROUP_PAIRS: [
+        ["us-embassy", "usembassy", "us_embassy"],
+        ["kcca", "kampala"],
+        ["urbanbetter", "urban_better", "urban-better"],
+      ],
+      STATUS_PAIRS: [
+        ["active", "enabled", "running"],
+        ["inactive", "disabled"],
+        ["inactive", "disabled", "stopped", "halted"],
+        ["pending", "processing"][("pending", "processing", "initializing")],
+      ],
+      LOCATION_ALIASES: [
+        ["kampala", "kla", "kamp"],
+        ["entebbe", "ebb", "entb"],
+        ["jinja", "jja"],
+      ],
+    },
   },
   GET_ROAD_METADATA_PATHS: {
     altitude: "altitude",
@@ -70,6 +96,16 @@ const mappings = {
     field4: "Sensor2 PM10_CF_1_ug/m3",
     field5: "Latitude",
     field6: "Longitude",
+    field7: "Battery Voltage",
+    field8: "ExtraData",
+  },
+  THINGSPEAK_GAS_FIELD_DESCRIPTIONS: {
+    field1: "PM2.5",
+    field2: "TVOC",
+    field3: "HCHO",
+    field4: "CO2",
+    field5: "Intake Temperature",
+    field6: "Intake Humidity",
     field7: "Battery Voltage",
     field8: "ExtraData",
   },
@@ -257,6 +293,12 @@ const mappings = {
       "battery.value": "battery",
       "satellites.value": "satellites",
       "hdop.value": "hdop",
+
+      "tvoc.value": "tvoc",
+      "hcho.value": "hcho",
+      "co2.value": "co2",
+      "intaketemperature.value": "intaketemperature",
+      "intakehumidity.value": "intakehumidity",
     },
     remove: [],
     defaults: {
@@ -380,6 +422,12 @@ const mappings = {
       "battery.value": null,
       "satellites.value": null,
       "hdop.value": null,
+
+      "tvoc.value": null,
+      "hcho.value": null,
+      "co2.value": null,
+      "intaketemperature.value": null,
+      "intakehumidity.value": null,
     },
     operate: [
       /**
