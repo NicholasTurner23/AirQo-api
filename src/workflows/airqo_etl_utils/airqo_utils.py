@@ -359,6 +359,17 @@ class AirQoDataUtils:
     def map_site_ids_to_historical_data(
         data: pd.DataFrame, deployment_logs: pd.DataFrame
     ) -> pd.DataFrame:
+        """
+        Maps `site_id` from `deployment_logs` to `data` based on `device_number` and timestamp.
+
+        Parameters:
+        - data (pd.DataFrame): Historical data containing `device_number` and `timestamp`.
+        - deployment_logs (pd.DataFrame): Logs containing `site_id`, `device_number`, and time intervals.
+
+        Returns:
+        - pd.DataFrame: Updated `data` with `site_id` mapped where applicable.
+        """
+        # TODO Clean up
         if deployment_logs.empty or data.empty:
             return data
 
@@ -617,7 +628,7 @@ class AirQoDataUtils:
         Parameters:
             devices (pd.DataFrame): A DataFrame containing device records, including 'device_id' and 'timestamp'.
 
-        Yields:
+        Returns:
             pd.DataFrame: A DataFrame containing processed and calibrated data for each device.
         """
 
